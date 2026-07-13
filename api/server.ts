@@ -7,10 +7,11 @@ import { closeDatabase } from './db.js';
 /**
  * start server with port
  */
+const HOST = process.env.HOST || "0.0.0.0";
 const PORT = process.env.PORT || 3001;
 
-const server = app.listen(PORT, () => {
-  console.log(`Server ready on port ${PORT}`);
+const server = app.listen(Number(PORT), HOST, () => {
+  console.log(`Server ready on ${HOST}:${PORT}`);
 });
 
 /**

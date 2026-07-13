@@ -139,7 +139,7 @@ Arquivo principal:
 
 - `cashier_app/integracao_frota_app.py`
 
-### 4. Banco PostgreSQL / AutoSystem
+### 4. Banco PostgreSQL 18 / AutoSystem
 
 Responsabilidades:
 
@@ -147,6 +147,13 @@ Responsabilidades:
 - executar trigger de aplicacao do desconto;
 - validar contexto da venda no momento em que o item entra no caixa;
 - refletir o desconto na tabela que o AutoSystem le (`lancto_caixa_promo`).
+
+Observacoes de infraestrutura:
+
+- o banco homologado para esta stack e `PostgreSQL 18`;
+- o banco roda diretamente no sistema operacional, fora do Docker;
+- apenas `frontend` e `backend` rodam em containers;
+- o backend em container acessa o banco do host por `host.docker.internal`.
 
 Arquivos principais:
 
@@ -387,6 +394,29 @@ Scripts principais em `package.json`:
 - `npm run check`: TypeScript sem emitir arquivos.
 - `npm run test`: testes Vitest.
 
+### Frontend + backend em Docker
+
+Arquivos principais:
+
+- `docker-compose.yml`
+- `Dockerfile.frontend`
+- `Dockerfile.backend`
+- `docker/nginx/default.conf`
+- `reiniciar-datafrota-docker.ps1`
+
+Fluxo operacional:
+
+- `frontend` sobe em `http://127.0.0.1:8080`;
+- `backend` sobe em `http://127.0.0.1:3001`;
+- o `nginx` do frontend faz proxy de `/api` para o servico `backend`;
+- o banco `PostgreSQL 18` permanece no host e nao em container.
+
+Comandos principais:
+
+- `docker compose up -d --build`
+- `docker compose down`
+- `.\reiniciar-datafrota-docker.ps1`
+
 ### App Python do caixa
 
 Executar:
@@ -409,6 +439,14 @@ Arquivo base: `.env.example`
 - `PGDATABASE`
 - `PGUSER`
 - `PGPASSWORD`
+- `HOST`
+- `PORT`
+
+Padrao atual para uso com Docker no Windows:
+
+- `PGHOST=host.docker.internal`
+- `PGPORT=5432`
+- `PORT=3001`
 
 ## Convencoes de engenharia
 
@@ -466,6 +504,14 @@ Leitura recomendada para novos desenvolvedores:
 10. `migrations/20260711_update_cashier_discount_next_sale.sql`
 
 ## Historico de mudancas relevantes
+
+## 2026-07-13 - Separacao de frontend e backend em containers
+
+- Area: infraestrutura | backend | frontend
+- Resumo: a stack passou a usar dois containers separados, um para o frontend em `nginx` e outro para o backend Node.js, mantendo o banco no host.
+- Motivo: simplificar operacao, deploy e isolamento entre interface e API sem containerizar o banco.
+- Arquivos principais: `docker-compose.yml`, `Dockerfile.frontend`, `Dockerfile.backend`, `docker/nginx/default.conf`, `reiniciar-datafrota-docker.ps1`, `README.md`
+- Impacto operacional: o acesso padrao fica em `:8080` para frontend e `:3001` para backend, com o `PostgreSQL 18` rodando fora do Docker e sendo acessado por `host.docker.internal`.
 
 ## 2026-07-11 - App do caixa e fluxo inicial de vouchers
 

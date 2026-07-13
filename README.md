@@ -1,57 +1,74 @@
-# React + TypeScript + Vite
+# DATAFROTA
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Aplicacao web com frontend em React + Vite e backend em Express/Node.js. O banco `PostgreSQL 18` roda fora dos containers, diretamente no sistema operacional.
 
-Currently, two official plugins are available:
+## Estrutura de containers
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- `frontend`: build do Vite servido por `nginx`
+- `backend`: API Node.js na porta `3001`
+- `postgresql 18`: fora do Docker, instalado no host
 
-## Expanding the ESLint configuration
+## Arquivos Docker
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- `Dockerfile.frontend`
+- `Dockerfile.backend`
+- `docker-compose.yml`
+- `docker/nginx/default.conf`
 
-```js
-export default tseslint.config({
-  extends: [
-    // Remove ...tseslint.configs.recommended and replace with this
-    ...tseslint.configs.recommendedTypeChecked,
-    // Alternatively, use this for stricter rules
-    ...tseslint.configs.strictTypeChecked,
-    // Optionally, add this for stylistic rules
-    ...tseslint.configs.stylisticTypeChecked,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+## Variaveis de ambiente
+
+Copie `.env.example` para `.env` e ajuste conforme sua instancia local do `PostgreSQL 18`:
+
+```bash
+PGHOST=host.docker.internal
+PGPORT=5432
+PGDATABASE=frota
+PGUSER=postgres
+PGPASSWORD=postgres
+HOST=0.0.0.0
+PORT=3001
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Observacoes:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+- Em Windows e Docker Desktop, `host.docker.internal` costuma funcionar direto.
+- Em Linux, o `docker-compose.yml` ja inclui `extra_hosts` com `host-gateway`.
+- Se o `PostgreSQL 18` estiver escutando apenas em `localhost`, confirme se ele aceita conexoes vindas do Docker no host.
 
-export default tseslint.config({
-  extends: [
-    // other configs...
-    // Enable lint rules for React
-    reactX.configs['recommended-typescript'],
-    // Enable lint rules for React DOM
-    reactDom.configs.recommended,
-  ],
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+## Subir com Docker
+
+```bash
+docker compose up -d --build
+```
+
+Ou use o script de reinicio completo:
+
+```powershell
+.\reiniciar-datafrota-docker.ps1
+```
+
+Acessos:
+
+- Frontend: [http://localhost:8080](http://localhost:8080)
+- Backend health: [http://localhost:3001/api/health](http://localhost:3001/api/health)
+
+## Parar containers
+
+```bash
+docker compose down
+```
+
+## Desenvolvimento local
+
+Para rodar sem Docker:
+
+```bash
+npm install
+npm run dev
+```
+
+API isolada:
+
+```bash
+npm run server:start
 ```

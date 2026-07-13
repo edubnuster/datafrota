@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+.git
+.trae
+.dbg
+.vite
+.run
+coverage
+*.log
+cashier_app/__pycache__
+**/__pycache__
+**/*.pyc
