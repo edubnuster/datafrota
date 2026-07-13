@@ -1,0 +1,41 @@
+<svg width="828" height="685" viewBox="0 0 828 685" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="databrevGradient" x1="68" y1="60" x2="430" y2="350" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D946EF"/>
+      <stop offset="0.58" stop-color="#8F67F6"/>
+      <stop offset="1" stop-color="#5AB8FF"/>
+    </linearGradient>
+    <linearGradient id="databrevShadow" x1="118" y1="330" x2="402" y2="548" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7F8DFF" stop-opacity="0.78"/>
+      <stop offset="0.5" stop-color="#445382" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#18C7F2" stop-opacity="0.96"/>
+    </linearGradient>
+    <filter id="softShadow" x="60" y="24" width="430" height="530" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#46567C" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#softShadow)">
+    <g transform="translate(78 42) rotate(11 176 140)">
+      <rect x="0" y="0" width="352" height="286" rx="64" fill="url(#databrevGradient)"/>
+    </g>
+    <g transform="translate(112 284) rotate(11 158 112)">
+      <path
+        d="M0 10C0 -8 18 -21 35 -17L258 34C310 46 346 92 346 145V193C346 248 307 296 253 307L47 350C23 355 0 337 0 312V10Z"
+        fill="url(#databrevShadow)"
+      />
+    </g>
+  </g>
+
+  <text
+    x="136"
+    y="515"
+    fill="#29286A"
+    font-family="Avenir Next, Nunito, Manrope, Segoe UI, sans-serif"
+    font-size="70"
+    font-weight="400"
+    letter-spacing="11"
+  >
+    Databrev
+  </text>
+</svg>
