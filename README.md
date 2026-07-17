@@ -25,12 +25,20 @@ PGPORT=5432
 PGDATABASE=frota
 PGUSER=postgres
 PGPASSWORD=postgres
+SAAS_PGHOST=host.docker.internal
+SAAS_PGPORT=5432
+SAAS_PGDATABASE=datafrota
+SAAS_PGUSER=postgres
+SAAS_PGPASSWORD=postgres
 HOST=0.0.0.0
 PORT=3001
 ```
 
 Observacoes:
 
+- `PG*` aponta para a base operacional do cliente, como `frota`.
+- `SAAS_PG*` aponta para a base do sistema SaaS, como `datafrota`.
+- Em Docker, o backend usa `DOCKER_PGHOST` e `DOCKER_SAAS_PGHOST` quando definidos; se nao estiverem definidos, usa `host.docker.internal`.
 - Em Windows e Docker Desktop, `host.docker.internal` costuma funcionar direto.
 - Em Linux, o `docker-compose.yml` ja inclui `extra_hosts` com `host-gateway`.
 - Se o `PostgreSQL 18` estiver escutando apenas em `localhost`, confirme se ele aceita conexoes vindas do Docker no host.

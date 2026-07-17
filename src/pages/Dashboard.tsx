@@ -15,6 +15,8 @@ import {
 
 export default function Dashboard() {
   const companies = useSaasStore((state) => state.companies);
+  const companiesLoading = useSaasStore((state) => state.companiesLoading);
+  const companiesError = useSaasStore((state) => state.companiesError);
   const metrics = calculateDashboardMetrics(companies);
   const statusSeries = buildStatusSeries(companies);
   const planSeries = buildPlanSeries(companies);
@@ -46,6 +48,24 @@ export default function Dashboard() {
         </div>
 
         <div className="grid gap-4">
+          {companiesError ? (
+            <div className="rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-700">
+              {companiesError}
+            </div>
+          ) : null}
+
+          {companiesLoading ? (
+            <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-500">
+              Carregando empresas do PostgreSQL local...
+            </div>
+          ) : null}
+
+          {!companiesLoading && recentCompanies.length === 0 ? (
+            <div className="rounded-[24px] border border-slate-200 bg-slate-50 px-5 py-4 text-sm text-slate-500">
+              Nenhuma empresa cadastrada no banco local.
+            </div>
+          ) : null}
+
           {recentCompanies.map((company) => (
             <article
               key={company.id}

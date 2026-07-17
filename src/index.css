@@ -98,12 +98,13 @@ h3,
   z-index: 1;
   display: grid;
   justify-items: center;
+  width: min(100%, 22rem);
 }
 
 .login-card {
-  width: min(100%, 18.8rem);
+  width: 100%;
   padding: 1.75rem 1.5rem 1.35rem;
-  border-radius: 2rem;
+  border-radius: 1.25rem;
   border: 1px solid rgba(255, 255, 255, 0.35);
   background: linear-gradient(180deg, rgba(234, 238, 241, 0.78), rgba(213, 220, 225, 0.72));
   box-shadow:
@@ -174,12 +175,14 @@ h3,
 
 .saas-input {
   width: 100%;
-  min-height: 3rem;
-  padding: 0.75rem 1rem;
-  border-radius: 1rem;
+  min-height: 2.625rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 0.9rem;
   border: 1px solid #e2e8f0;
   background: #f8fafc;
   color: #0f172a;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
   outline: none;
   transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
 }
@@ -188,4 +191,39 @@ h3,
   border-color: #8b5cf6;
   box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.14);
   background: #fff;
+}
+
+.saas-compact-search {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-height: 2.625rem;
+  border-radius: 1rem;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  padding: 0.55rem 0.85rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: #64748b;
+  transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.saas-compact-search:focus-within {
+  border-color: #8b5cf6;
+  box-shadow: 0 0 0 4px rgba(139, 92, 246, 0.14);
+  background: #fff;
+}
+
+.saas-compact-search input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #0f172a;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.saas-compact-search input::placeholder {
+  color: #94a3b8;
 }

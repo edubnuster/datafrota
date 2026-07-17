@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import type { ReferenceDataType, ReferenceOption } from "../../shared/referenceData";
 import { fetchReferenceData } from "@/utils/api";
 
-export function useReferenceData(type: ReferenceDataType, search = "") {
+export function useReferenceData(type: ReferenceDataType, search = "", selectedCodes: string[] = []) {
   const [items, setItems] = useState<ReferenceOption[]>([]);
   const [loading, setLoading] = useState(false);
+  const selectedCodesKey = selectedCodes.join(",");
 
   useEffect(() => {
     let active = true;
@@ -15,7 +16,7 @@ export function useReferenceData(type: ReferenceDataType, search = "") {
 
       for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-          const data = await fetchReferenceData(type, search);
+          const data = await fetchReferenceData(type, search, selectedCodes);
           if (active) {
             setItems(data);
             setLoading(false);
@@ -48,7 +49,7 @@ export function useReferenceData(type: ReferenceDataType, search = "") {
         window.clearTimeout(retryTimer);
       }
     };
-  }, [type, search]);
+  }, [type, search, selectedCodesKey]);
 
   return { items, loading };
 }

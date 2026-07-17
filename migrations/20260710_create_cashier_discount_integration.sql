@@ -30,9 +30,11 @@ CREATE TABLE IF NOT EXISTS public.datafrota_desconto_pendente (
         CHECK (status IN ('P', 'R', 'A', 'C', 'X', 'E'))
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS datafrota_desc_codigo_ativo_uk
+DROP INDEX IF EXISTS public.datafrota_desc_codigo_ativo_uk;
+
+CREATE UNIQUE INDEX datafrota_desc_codigo_ativo_uk
     ON public.datafrota_desconto_pendente (codigo_desconto)
-    WHERE status IN ('P', 'R', 'A');
+    WHERE status IN ('P', 'R');
 
 CREATE UNIQUE INDEX IF NOT EXISTS datafrota_desc_abast_ativo_uk
     ON public.datafrota_desconto_pendente (abastecimento)

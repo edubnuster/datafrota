@@ -14,9 +14,10 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const defaultRoute = session?.role === "company_admin" ? "/empresa/dashboard" : "/dashboard";
 
   if (session) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={defaultRoute} replace />;
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -29,7 +30,7 @@ export default function Login() {
     setSubmitting(false);
 
     if (ok) {
-      navigate("/dashboard", { replace: true });
+      navigate("/", { replace: true });
     }
   }
 
@@ -42,10 +43,10 @@ export default function Login() {
             <DatabrevLogo />
           </div>
 
-          <div className="mt-6">
+          <div className="mt-6 text-center">
             <h1 className="whitespace-nowrap text-[1.75rem] font-semibold tracking-tight text-slate-950">Seja bem-vindo!</h1>
-            <p className="mt-2 max-w-[18rem] text-[13px] leading-6 text-slate-500">
-              Insira suas credenciais administrativas para acessar o painel de gestao.
+            <p className="mt-2 max-w-[18rem] text-[13px] leading-6 text-slate-500 mx-auto">
+              Digite seus dados de acesso para continuar.
             </p>
           </div>
 
@@ -94,7 +95,7 @@ export default function Login() {
           </form>
         </div>
 
-        <p className="mt-5 text-center text-[11px] text-white/80 drop-shadow-[0_1px_2px_rgba(15,23,42,0.45)]">
+        <p className="mt-5 whitespace-nowrap text-center text-[11px] text-white/80 drop-shadow-[0_1px_2px_rgba(15,23,42,0.45)]">
           © 2026 Databrev Tecnologia. Acesso restrito. Contate o administrador.
         </p>
       </div>

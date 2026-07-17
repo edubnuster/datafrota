@@ -8,6 +8,11 @@ import dotenv from "dotenv";
 import discountCodeRoutes from "./routes/discountCodes.js";
 import cashierDiscountRoutes from "./routes/cashierDiscounts.js";
 import referenceDataRoutes from "./routes/referenceData.js";
+import companyRoutes from "./routes/companies.js";
+import promotionRoutes from "./routes/promotions.js";
+import pdvPromotionRoutes from "./routes/pdvPromotions.js";
+import pdvAgentRoutes from "./routes/pdvAgents.js";
+import adminAccountRoutes from "./routes/adminAccount.js";
 
 dotenv.config();
 
@@ -23,6 +28,11 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use("/api/discount-codes", discountCodeRoutes);
 app.use("/api/cashier-discounts", cashierDiscountRoutes);
 app.use("/api/reference-data", referenceDataRoutes);
+app.use("/api/companies", companyRoutes);
+app.use("/api/promotions", promotionRoutes);
+app.use("/api/pdv-promotions", pdvPromotionRoutes);
+app.use("/api/pdv-agents", pdvAgentRoutes);
+app.use("/api/admin-account", adminAccountRoutes);
 
 /**
  * health
@@ -33,10 +43,17 @@ app.use(
     res.status(200).json({
       success: true,
       message: "ok",
-      database: {
-        host: process.env.PGHOST || "localhost",
-        port: Number(process.env.PGPORT || 5432),
-        database: process.env.PGDATABASE || "frota",
+      databases: {
+        client: {
+          host: process.env.PGHOST || "localhost",
+          port: Number(process.env.PGPORT || 5432),
+          database: process.env.PGDATABASE || "frota",
+        },
+        saas: {
+          host: process.env.SAAS_PGHOST || process.env.PGHOST || "localhost",
+          port: Number(process.env.SAAS_PGPORT || process.env.PGPORT || 5432),
+          database: process.env.SAAS_PGDATABASE || "datafrota",
+        },
       },
     });
   },

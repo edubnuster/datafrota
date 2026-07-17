@@ -1,0 +1,130 @@
+{
+  "serverTime": "2026-07-17T18:41:20.387Z",
+  "savedAt": "2026-07-17T15:41:20",
+  "items": [
+    {
+      "promotionId": "promo_mroentyjhp1a1x",
+      "name": "Desconto Aniversario",
+      "voucherCode": "4UGXF",
+      "status": "ativa",
+      "description": "Desconto de aniversario de 30% para qualquer doce",
+      "discountType": "percent",
+      "discountValue": "30",
+      "productMode": "group",
+      "productCodes": [],
+      "productGroupCodes": [
+        "7",
+        "103",
+        "104"
+      ],
+      "audienceMode": "all",
+      "customerCodes": [],
+      "customerGroupCodes": [],
+      "firstPurchaseOnly": false,
+      "newCustomerDays": "30",
+      "selectedBranchIds": [
+        "15332905",
+        "17328707",
+        "1",
+        "3937613",
+        "10",
+        "12",
+        "11"
+      ],
+      "paymentMode": "all",
+      "paymentFormCodes": [],
+      "startDate": "2026-07-17",
+      "endDate": "2026-07-31",
+      "startTime": "",
+      "endTime": "",
+      "activeWeekdays": [
+        "dom",
+        "seg",
+        "ter",
+        "qua",
+        "qui",
+        "sex",
+        "sab"
+      ],
+      "birthdayOnly": true,
+      "maxDiscountPerDay": "10",
+      "maxVolumePerDay": "",
+      "maxQuantityPerItem": "",
+      "redemptionsPerCustomer": "1",
+      "maxPurchasesPerWeek": "",
+      "maxPurchasesPerMonth": "",
+      "couponValidityMinutes": "15",
+      "updatedAt": "2026-07-17T03:55:47.948Z",
+      "integration": {
+        "state": "published",
+        "authorizationId": "dau_mroentzqmtxeyf",
+        "error": null,
+        "syncedAt": "2026-07-17T03:55:47.999Z"
+      }
+    },
+    {
+      "promotionId": "promo_mrmp2g01okh4s7",
+      "name": "Desconto 10% / Gas Ad / Seg-Qua / Cartao Kaninha / Pix",
+      "voucherCode": "DKDMN",
+      "status": "ativa",
+      "description": "Desconto 10% / Gas Ad / Seg-Qua / Cartao Kaninha / Pix",
+      "discountType": "percent",
+      "discountValue": "10",
+      "productMode": "individual",
+      "productCodes": [
+        "2",
+        "1"
+      ],
+      "productGroupCodes": [],
+      "audienceMode": "group",
+      "customerCodes": [],
+      "customerGroupCodes": [
+        "34"
+      ],
+      "firstPurchaseOnly": false,
+      "newCustomerDays": "45",
+      "selectedBranchIds": [
+        "17328707",
+        "15332905",
+        "1",
+        "3937613",
+        "10",
+        "12",
+        "11"
+      ],
+      "paymentMode": "selected",
+      "paymentFormCodes": [
+        "14136362727",
+        "6047787",
+        "5726089",
+        "14647409",
+        "165"
+      ],
+      "startDate": "2026-07-15",
+      "endDate": "2026-07-31",
+      "startTime": "",
+      "endTime": "",
+      "activeWeekdays": [
+        "seg",
+        "ter",
+        "qua",
+        "qui"
+      ],
+      "birthdayOnly": true,
+      "maxDiscountPerDay": "50",
+      "maxVolumePerDay": "100",
+      "maxQuantityPerItem": "20",
+      "redemptionsPerCustomer": "1",
+      "maxPurchasesPerWeek": "3",
+      "maxPurchasesPerMonth": "10",
+      "couponValidityMinutes": "15",
+      "updatedAt": "2026-07-16T22:20:13.275Z",
+      "integration": {
+        "state": "published",
+        "authorizationId": "dau_mrmw78w9a85ulo",
+        "error": null,
+        "syncedAt": "2026-07-16T22:20:13.301Z"
+      }
+    }
+  ]
+}

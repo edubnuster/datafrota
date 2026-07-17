@@ -10,6 +10,11 @@ import {
 } from "../../shared/discount.js";
 import { ensureDiscountSchema, query } from "../db.js";
 
+export type DiscountCodeTenantScope = {
+  companyId: string | null;
+  sourceBranchId: string | null;
+};
+
 function createAuthorizationId(): string {
   return `dau_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -49,10 +54,14 @@ async function validateActiveReferences(input: CreateDiscountCodeInput): Promise
   if (input.productCodes && input.productCodes.length > 0) {
     const result = await query<ActiveCountRow>(
       `
-        SELECT COUNT(DISTINCT CAST(grid AS TEXT)) AS total
-        FROM produto
-        WHERE (codigo = ANY($1::text[]) OR CAST(grid AS TEXT) = ANY($1::text[]))
-          AND flag = 'A'
+        SELECT COUNT(*) AS total
+        FROM unnest($1::text[]) AS selected(code)
+        WHERE EXISTS (
+          SELECT 1
+          FROM produto
+          WHERE (codigo = selected.code OR CAST(grid AS TEXT) = selected.code)
+            AND flag = 'A'
+        )
       `,
       [input.productCodes],
     );
@@ -83,10 +92,14 @@ async function validateActiveReferences(input: CreateDiscountCodeInput): Promise
   if (input.customerCodes && input.customerCodes.length > 0) {
     const result = await query<ActiveCountRow>(
       `
-        SELECT COUNT(DISTINCT CAST(grid AS TEXT)) AS total
-        FROM pessoa
-        WHERE (CAST(codigo AS TEXT) = ANY($1::text[]) OR CAST(grid AS TEXT) = ANY($1::text[]))
-          AND flag = 'A'
+        SELECT COUNT(*) AS total
+        FROM unnest($1::text[]) AS selected(code)
+        WHERE EXISTS (
+          SELECT 1
+          FROM pessoa
+          WHERE (CAST(codigo AS TEXT) = selected.code OR CAST(grid AS TEXT) = selected.code)
+            AND flag = 'A'
+        )
       `,
       [input.customerCodes],
     );
@@ -115,16 +128,40 @@ async function validateActiveReferences(input: CreateDiscountCodeInput): Promise
   if (input.paymentFormCodes && input.paymentFormCodes.length > 0) {
     const result = await query<ActiveCountRow>(
       `
-        SELECT COUNT(DISTINCT CAST(grid AS TEXT)) AS total
-        FROM forma_pgto
-        WHERE (CAST(codigo AS TEXT) = ANY($1::text[]) OR CAST(grid AS TEXT) = ANY($1::text[]))
-          AND flag = 'A'
+        SELECT COUNT(*) AS total
+        FROM unnest($1::text[]) AS selected(code)
+        WHERE EXISTS (
+          SELECT 1
+          FROM forma_pgto
+          WHERE (CAST(codigo AS TEXT) = selected.code OR CAST(grid AS TEXT) = selected.code)
+            AND flag = 'A'
+        )
       `,
       [input.paymentFormCodes],
     );
 
     if (Number(result.rows[0]?.total ?? 0) !== input.paymentFormCodes.length) {
       issues.push("Uma ou mais formas de pagamento informadas nao existem ou nao estao ativas.");
+    }
+  }
+
+  if (input.selectedBranchIds && input.selectedBranchIds.length > 0) {
+    const result = await query<ActiveCountRow>(
+      `
+        SELECT COUNT(*) AS total
+        FROM unnest($1::text[]) AS selected(code)
+        WHERE EXISTS (
+          SELECT 1
+          FROM empresa
+          WHERE (CAST(codigo AS TEXT) = selected.code OR CAST(grid AS TEXT) = selected.code)
+            AND flag = 'A'
+        )
+      `,
+      [input.selectedBranchIds],
+    );
+
+    if (Number(result.rows[0]?.total ?? 0) !== input.selectedBranchIds.length) {
+      issues.push("Uma ou mais filiais informadas nao existem ou nao estao ativas.");
     }
   }
 
@@ -139,7 +176,21 @@ type DiscountAuthorizationRow = {
   product_group_codes: string[] | null;
   customer_codes: string[] | null;
   customer_group_codes: string[] | null;
+  first_purchase_only: boolean | null;
+  new_customer_days: string | number | null;
+  branch_ids: string[] | null;
   payment_form_codes: string[] | null;
+  active_weekdays: string[] | null;
+  start_time: string | null;
+  end_time: string | null;
+  birthday_only: boolean | null;
+  max_discount_per_day: string | number | null;
+  max_volume_per_day: string | number | null;
+  max_quantity_per_item: string | number | null;
+  redemptions_per_customer: string | number | null;
+  max_purchases_per_week: string | number | null;
+  max_purchases_per_month: string | number | null;
+  reusable: boolean | null;
   discount_percent: string | number;
   valid_from: string | null;
   valid_until: string | null;
@@ -157,7 +208,44 @@ function mapRow(row: DiscountAuthorizationRow): DiscountAuthorization {
     productGroupCodes: row.product_group_codes ?? [],
     customerCodes: row.customer_codes ?? [],
     customerGroupCodes: row.customer_group_codes ?? [],
+    firstPurchaseOnly: Boolean(row.first_purchase_only),
+    newCustomerDays:
+      row.new_customer_days === null || row.new_customer_days === undefined
+        ? null
+        : Number(row.new_customer_days),
+    selectedBranchIds: row.branch_ids ?? [],
     paymentFormCodes: row.payment_form_codes ?? [],
+    activeWeekdays: (row.active_weekdays ?? []).filter((value): value is DiscountAuthorization["activeWeekdays"][number] =>
+      ["dom", "seg", "ter", "qua", "qui", "sex", "sab"].includes(value),
+    ),
+    startTime: row.start_time ?? null,
+    endTime: row.end_time ?? null,
+    birthdayOnly: Boolean(row.birthday_only),
+    maxDiscountPerDay:
+      row.max_discount_per_day === null || row.max_discount_per_day === undefined
+        ? null
+        : Number(row.max_discount_per_day),
+    maxVolumePerDay:
+      row.max_volume_per_day === null || row.max_volume_per_day === undefined
+        ? null
+        : Number(row.max_volume_per_day),
+    maxQuantityPerItem:
+      row.max_quantity_per_item === null || row.max_quantity_per_item === undefined
+        ? null
+        : Number(row.max_quantity_per_item),
+    redemptionsPerCustomer:
+      row.redemptions_per_customer === null || row.redemptions_per_customer === undefined
+        ? null
+        : Number(row.redemptions_per_customer),
+    maxPurchasesPerWeek:
+      row.max_purchases_per_week === null || row.max_purchases_per_week === undefined
+        ? null
+        : Number(row.max_purchases_per_week),
+    maxPurchasesPerMonth:
+      row.max_purchases_per_month === null || row.max_purchases_per_month === undefined
+        ? null
+        : Number(row.max_purchases_per_month),
+    reusable: Boolean(row.reusable),
     discountPercent: Number(row.discount_percent),
     validFrom: row.valid_from ? new Date(row.valid_from).toISOString() : null,
     validUntil: row.valid_until ? new Date(row.valid_until).toISOString() : null,
@@ -182,11 +270,21 @@ function buildLegacyCompatibleArraySql(alias: string, arrayColumn: string, legac
 function buildProductCodesSql(alias: string): string {
   return `
     COALESCE((
-      SELECT array_agg(COALESCE(prod.codigo, selected.code) ORDER BY selected.ord)
+      SELECT array_agg(COALESCE(prod.display_code, selected.code) ORDER BY selected.ord)
       FROM unnest(${buildLegacyCompatibleArraySql(alias, "product_codes", "product_code")}) WITH ORDINALITY AS selected(code, ord)
-      LEFT JOIN produto prod
-        ON CAST(prod.grid AS TEXT) = selected.code
-        OR prod.codigo = selected.code
+      LEFT JOIN LATERAL (
+        SELECT produto.codigo AS display_code
+        FROM produto
+        WHERE CAST(produto.grid AS TEXT) = selected.code
+           OR produto.codigo = selected.code
+        ORDER BY CASE
+          WHEN CAST(produto.grid AS TEXT) = selected.code THEN 0
+          WHEN produto.codigo = selected.code THEN 1
+          ELSE 2
+        END,
+        produto.grid DESC
+        LIMIT 1
+      ) prod ON TRUE
     ), ARRAY[]::text[])
   `;
 }
@@ -194,11 +292,21 @@ function buildProductCodesSql(alias: string): string {
 function buildCustomerCodesSql(alias: string): string {
   return `
     COALESCE((
-      SELECT array_agg(COALESCE(CAST(pe.codigo AS text), selected.code) ORDER BY selected.ord)
+      SELECT array_agg(COALESCE(pe.display_code, selected.code) ORDER BY selected.ord)
       FROM unnest(${buildLegacyCompatibleArraySql(alias, "customer_codes", "customer_code")}) WITH ORDINALITY AS selected(code, ord)
-      LEFT JOIN pessoa pe
-        ON CAST(pe.grid AS TEXT) = selected.code
-        OR CAST(pe.codigo AS TEXT) = selected.code
+      LEFT JOIN LATERAL (
+        SELECT CAST(pessoa.codigo AS text) AS display_code
+        FROM pessoa
+        WHERE CAST(pessoa.grid AS TEXT) = selected.code
+           OR CAST(pessoa.codigo AS TEXT) = selected.code
+        ORDER BY CASE
+          WHEN CAST(pessoa.grid AS TEXT) = selected.code THEN 0
+          WHEN CAST(pessoa.codigo AS TEXT) = selected.code THEN 1
+          ELSE 2
+        END,
+        pessoa.grid DESC
+        LIMIT 1
+      ) pe ON TRUE
     ), ARRAY[]::text[])
   `;
 }
@@ -206,13 +314,23 @@ function buildCustomerCodesSql(alias: string): string {
 function buildPaymentFormCodesSql(alias: string): string {
   return `
     COALESCE((
-      SELECT array_agg(COALESCE(fp.codigo::text, selected.code) ORDER BY selected.ord)
+      SELECT array_agg(COALESCE(fp.display_code, selected.code) ORDER BY selected.ord)
       FROM unnest(
         ${buildLegacyCompatibleArraySql(alias, "payment_form_codes", "payment_form_code")}
       ) WITH ORDINALITY AS selected(code, ord)
-      LEFT JOIN forma_pgto fp
-        ON CAST(fp.grid AS TEXT) = selected.code
-        OR CAST(fp.codigo AS TEXT) = selected.code
+      LEFT JOIN LATERAL (
+        SELECT CAST(forma_pgto.codigo AS text) AS display_code
+        FROM forma_pgto
+        WHERE CAST(forma_pgto.grid AS TEXT) = selected.code
+           OR CAST(forma_pgto.codigo AS TEXT) = selected.code
+        ORDER BY CASE
+          WHEN CAST(forma_pgto.grid AS TEXT) = selected.code THEN 0
+          WHEN CAST(forma_pgto.codigo AS TEXT) = selected.code THEN 1
+          ELSE 2
+        END,
+        forma_pgto.grid DESC
+        LIMIT 1
+      ) fp ON TRUE
     ), ARRAY[]::text[])
   `;
 }
@@ -224,23 +342,44 @@ async function resolveProductCodes(
     return { displayCodes: [], internalCodes: [] };
   }
 
-  const result = await query<{ display_code: string; internal_code: string }>(
+  const result = await query<{
+    requested_code: string;
+    display_code: string;
+    internal_code: string;
+    matched_by: "code" | "grid";
+  }>(
     `
-      SELECT DISTINCT ON (CAST(grid AS TEXT))
-        codigo AS display_code,
-        CAST(grid AS TEXT) AS internal_code
-      FROM produto
-      WHERE (codigo = ANY($1::text[]) OR CAST(grid AS TEXT) = ANY($1::text[]))
-        AND flag = 'A'
-      ORDER BY CAST(grid AS TEXT), CASE WHEN codigo = ANY($1::text[]) THEN 0 ELSE 1 END, grid DESC
+      SELECT
+        selected.code AS requested_code,
+        produto.codigo AS display_code,
+        CAST(produto.grid AS TEXT) AS internal_code,
+        CASE
+          WHEN CAST(produto.grid AS TEXT) = selected.code THEN 'grid'
+          ELSE 'code'
+        END AS matched_by
+      FROM unnest($1::text[]) WITH ORDINALITY AS selected(code, ord)
+      INNER JOIN produto
+        ON (produto.codigo = selected.code OR CAST(produto.grid AS TEXT) = selected.code)
+       AND produto.flag = 'A'
+      ORDER BY selected.ord, produto.grid DESC
     `,
     [productCodes],
   );
 
+  const allCode = productCodes.every((code) => result.rows.some((row) => row.requested_code === code && row.matched_by === "code"));
+  const allGrid = productCodes.every((code) => result.rows.some((row) => row.requested_code === code && row.matched_by === "grid"));
+  const preferCode = allCode && !allGrid;
+
   const resolvedByCode = new Map<string, { display_code: string; internal_code: string }>();
-  for (const row of result.rows) {
-    resolvedByCode.set(row.display_code, row);
-    resolvedByCode.set(row.internal_code, row);
+  for (const code of productCodes) {
+    const candidates = result.rows.filter((row) => row.requested_code === code);
+    const picked =
+      candidates.find((row) => row.matched_by === (preferCode ? "code" : "grid")) ??
+      candidates.find((row) => row.matched_by === (preferCode ? "grid" : "code"));
+
+    if (picked) {
+      resolvedByCode.set(code, picked);
+    }
   }
 
   const resolved = productCodes
@@ -260,23 +399,44 @@ async function resolveCustomerCodes(
     return { displayCodes: [], internalCodes: [] };
   }
 
-  const result = await query<{ display_code: string; internal_code: string }>(
+  const result = await query<{
+    requested_code: string;
+    display_code: string;
+    internal_code: string;
+    matched_by: "code" | "grid";
+  }>(
     `
-      SELECT DISTINCT ON (CAST(grid AS TEXT))
-        CAST(codigo AS TEXT) AS display_code,
-        CAST(grid AS TEXT) AS internal_code
-      FROM pessoa
-      WHERE (CAST(codigo AS TEXT) = ANY($1::text[]) OR CAST(grid AS TEXT) = ANY($1::text[]))
-        AND flag = 'A'
-      ORDER BY CAST(grid AS TEXT), CASE WHEN CAST(codigo AS TEXT) = ANY($1::text[]) THEN 0 ELSE 1 END, grid DESC
+      SELECT
+        selected.code AS requested_code,
+        CAST(pessoa.codigo AS TEXT) AS display_code,
+        CAST(pessoa.grid AS TEXT) AS internal_code,
+        CASE
+          WHEN CAST(pessoa.grid AS TEXT) = selected.code THEN 'grid'
+          ELSE 'code'
+        END AS matched_by
+      FROM unnest($1::text[]) WITH ORDINALITY AS selected(code, ord)
+      INNER JOIN pessoa
+        ON (CAST(pessoa.codigo AS TEXT) = selected.code OR CAST(pessoa.grid AS TEXT) = selected.code)
+       AND pessoa.flag = 'A'
+      ORDER BY selected.ord, pessoa.grid DESC
     `,
     [customerCodes],
   );
 
+  const allCode = customerCodes.every((code) => result.rows.some((row) => row.requested_code === code && row.matched_by === "code"));
+  const allGrid = customerCodes.every((code) => result.rows.some((row) => row.requested_code === code && row.matched_by === "grid"));
+  const preferCode = allCode && !allGrid;
+
   const resolvedByCode = new Map<string, { display_code: string; internal_code: string }>();
-  for (const row of result.rows) {
-    resolvedByCode.set(row.display_code, row);
-    resolvedByCode.set(row.internal_code, row);
+  for (const code of customerCodes) {
+    const candidates = result.rows.filter((row) => row.requested_code === code);
+    const picked =
+      candidates.find((row) => row.matched_by === (preferCode ? "code" : "grid")) ??
+      candidates.find((row) => row.matched_by === (preferCode ? "grid" : "code"));
+
+    if (picked) {
+      resolvedByCode.set(code, picked);
+    }
   }
 
   const resolved = customerCodes
@@ -296,23 +456,44 @@ async function resolvePaymentFormCodes(
     return { displayCodes: [], internalCodes: [] };
   }
 
-  const result = await query<{ display_code: string; internal_code: string }>(
+  const result = await query<{
+    requested_code: string;
+    display_code: string;
+    internal_code: string;
+    matched_by: "code" | "grid";
+  }>(
     `
-      SELECT DISTINCT ON (CAST(grid AS TEXT))
-        CAST(codigo AS TEXT) AS display_code,
-        CAST(grid AS TEXT) AS internal_code
-      FROM forma_pgto
-      WHERE (CAST(codigo AS TEXT) = ANY($1::text[]) OR CAST(grid AS TEXT) = ANY($1::text[]))
-        AND flag = 'A'
-      ORDER BY CAST(grid AS TEXT), CASE WHEN CAST(codigo AS TEXT) = ANY($1::text[]) THEN 0 ELSE 1 END, grid DESC
+      SELECT
+        selected.code AS requested_code,
+        CAST(forma_pgto.codigo AS TEXT) AS display_code,
+        CAST(forma_pgto.grid AS TEXT) AS internal_code,
+        CASE
+          WHEN CAST(forma_pgto.grid AS TEXT) = selected.code THEN 'grid'
+          ELSE 'code'
+        END AS matched_by
+      FROM unnest($1::text[]) WITH ORDINALITY AS selected(code, ord)
+      INNER JOIN forma_pgto
+        ON (CAST(forma_pgto.codigo AS TEXT) = selected.code OR CAST(forma_pgto.grid AS TEXT) = selected.code)
+       AND forma_pgto.flag = 'A'
+      ORDER BY selected.ord, forma_pgto.grid DESC
     `,
     [paymentFormCodes],
   );
 
+  const allCode = paymentFormCodes.every((code) => result.rows.some((row) => row.requested_code === code && row.matched_by === "code"));
+  const allGrid = paymentFormCodes.every((code) => result.rows.some((row) => row.requested_code === code && row.matched_by === "grid"));
+  const preferCode = allCode && !allGrid;
+
   const resolvedByCode = new Map<string, { display_code: string; internal_code: string }>();
-  for (const row of result.rows) {
-    resolvedByCode.set(row.display_code, row);
-    resolvedByCode.set(row.internal_code, row);
+  for (const code of paymentFormCodes) {
+    const candidates = result.rows.filter((row) => row.requested_code === code);
+    const picked =
+      candidates.find((row) => row.matched_by === (preferCode ? "code" : "grid")) ??
+      candidates.find((row) => row.matched_by === (preferCode ? "grid" : "code"));
+
+    if (picked) {
+      resolvedByCode.set(code, picked);
+    }
   }
 
   const resolved = paymentFormCodes
@@ -331,37 +512,29 @@ async function getExistingCodes(): Promise<Set<string>> {
   return new Set(result.rows.map((row) => row.short_code));
 }
 
-export async function listDiscountCodes(): Promise<DiscountAuthorization[]> {
-  await ensureDiscountSchema();
-  const result = await query<DiscountAuthorizationRow>(`
-    SELECT
-      da.id,
-      da.short_code,
-      da.scope,
-      ${buildProductCodesSql("da")} AS product_codes,
-      ${buildLegacyCompatibleArraySql("da", "product_group_codes", "product_group_code")} AS product_group_codes,
-      ${buildCustomerCodesSql("da")} AS customer_codes,
-      ${buildLegacyCompatibleArraySql("da", "customer_group_codes", "customer_group_code")} AS customer_group_codes,
-      ${buildPaymentFormCodesSql("da")} AS payment_form_codes,
-      da.discount_percent,
-      da.valid_from,
-      da.valid_until,
-      da.status,
-      da.created_at,
-      da.cancelled_at
-    FROM discount_authorization da
-    ORDER BY da.created_at DESC
-  `);
+type ExistingAuthorizationIdentityRow = {
+  id: string;
+  created_at: string | Date;
+};
 
-  return result.rows
-    .map(mapRow)
-    .map(withEffectiveStatus)
-    .sort((first, second) => second.createdAt.localeCompare(first.createdAt));
+async function getExistingAuthorizationIdentity(shortCode: string): Promise<ExistingAuthorizationIdentityRow | null> {
+  const result = await query<ExistingAuthorizationIdentityRow>(
+    `
+      SELECT id, created_at
+      FROM discount_authorization
+      WHERE short_code = $1
+      LIMIT 1
+    `,
+    [shortCode],
+  );
+
+  return result.rows[0] ?? null;
 }
 
-export async function createDiscountCode(
+async function buildOperationalAuthorization(
+  shortCode: string,
   input: CreateDiscountCodeInput,
-): Promise<DiscountAuthorization> {
+): Promise<{ normalized: CreateDiscountCodeInput; authorization: DiscountAuthorization }> {
   const issues = validateCreateDiscountInput(input);
   if (issues.length > 0) {
     throw new DiscountValidationError(issues);
@@ -381,29 +554,59 @@ export async function createDiscountCode(
   const resolvedPaymentForms = await resolvePaymentFormCodes(normalized.paymentFormCodes ?? []);
   normalized.paymentFormCodes = resolvedPaymentForms.internalCodes;
 
-  const shortCode = await generateUniqueShortCode(await getExistingCodes());
+  const existing = await getExistingAuthorizationIdentity(shortCode);
+  const createdAt = existing?.created_at ? new Date(existing.created_at).toISOString() : new Date().toISOString();
+  const normalizedCode = shortCode.trim().toUpperCase();
 
-  const created: DiscountAuthorization = {
-    id: createAuthorizationId(),
-    shortCode,
-    scope: buildDiscountScope(normalized),
-    productCodes: resolvedProducts.displayCodes,
-    productGroupCodes: normalized.productGroupCodes ?? [],
-    customerCodes: resolvedCustomers.displayCodes,
-    customerGroupCodes: normalized.customerGroupCodes ?? [],
-    paymentFormCodes: resolvedPaymentForms.displayCodes,
-    discountPercent: normalized.discountPercent,
-    validFrom: normalized.validFrom ?? null,
-    validUntil: normalized.validUntil ?? null,
-    status: "ACTIVE",
-    createdAt: new Date().toISOString(),
-    cancelledAt: null,
+  return {
+    normalized,
+    authorization: {
+      id: existing?.id ?? createAuthorizationId(),
+      shortCode: normalizedCode,
+      scope: buildDiscountScope(normalized),
+      productCodes: resolvedProducts.displayCodes,
+      productGroupCodes: normalized.productGroupCodes ?? [],
+      customerCodes: resolvedCustomers.displayCodes,
+      customerGroupCodes: normalized.customerGroupCodes ?? [],
+      firstPurchaseOnly: Boolean(normalized.firstPurchaseOnly),
+      newCustomerDays:
+        normalized.newCustomerDays === null || normalized.newCustomerDays === undefined
+          ? null
+          : Number(normalized.newCustomerDays),
+      selectedBranchIds: normalized.selectedBranchIds ?? [],
+      paymentFormCodes: resolvedPaymentForms.displayCodes,
+      activeWeekdays: normalized.activeWeekdays ?? [],
+      startTime: normalized.startTime ?? null,
+      endTime: normalized.endTime ?? null,
+      birthdayOnly: Boolean(normalized.birthdayOnly),
+      maxDiscountPerDay: normalized.maxDiscountPerDay ?? null,
+      maxVolumePerDay: normalized.maxVolumePerDay ?? null,
+      maxQuantityPerItem: normalized.maxQuantityPerItem ?? null,
+      redemptionsPerCustomer: normalized.redemptionsPerCustomer ?? null,
+      maxPurchasesPerWeek: normalized.maxPurchasesPerWeek ?? null,
+      maxPurchasesPerMonth: normalized.maxPurchasesPerMonth ?? null,
+      reusable: Boolean(normalized.reusable),
+      discountPercent: normalized.discountPercent,
+      validFrom: normalized.validFrom ?? null,
+      validUntil: normalized.validUntil ?? null,
+      status: "ACTIVE",
+      createdAt,
+      cancelledAt: null,
+    },
   };
+}
 
+async function persistOperationalAuthorization(
+  authorization: DiscountAuthorization,
+  normalized: CreateDiscountCodeInput,
+  tenantScope: DiscountCodeTenantScope = { companyId: null, sourceBranchId: null },
+): Promise<DiscountAuthorization> {
   await query(
     `
       INSERT INTO discount_authorization (
         id,
+        company_id,
+        source_branch_id,
         short_code,
         scope,
         product_codes,
@@ -414,8 +617,22 @@ export async function createDiscountCode(
         customer_code,
         customer_group_codes,
         customer_group_code,
+        first_purchase_only,
+        new_customer_days,
+        branch_ids,
         payment_form_codes,
         payment_form_code,
+        active_weekdays,
+        start_time,
+        end_time,
+        birthday_only,
+        max_discount_per_day,
+        max_volume_per_day,
+        max_quantity_per_item,
+        redemptions_per_customer,
+        max_purchases_per_week,
+        max_purchases_per_month,
+        reusable,
         discount_percent,
         valid_from,
         valid_until,
@@ -423,32 +640,173 @@ export async function createDiscountCode(
         created_at,
         cancelled_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+        $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+        $31, $32, $33, $34, $35
+      )
+      ON CONFLICT (short_code) DO UPDATE
+      SET
+        company_id = EXCLUDED.company_id,
+        source_branch_id = EXCLUDED.source_branch_id,
+        scope = EXCLUDED.scope,
+        product_codes = EXCLUDED.product_codes,
+        product_code = EXCLUDED.product_code,
+        product_group_codes = EXCLUDED.product_group_codes,
+        product_group_code = EXCLUDED.product_group_code,
+        customer_codes = EXCLUDED.customer_codes,
+        customer_code = EXCLUDED.customer_code,
+        customer_group_codes = EXCLUDED.customer_group_codes,
+        customer_group_code = EXCLUDED.customer_group_code,
+        first_purchase_only = EXCLUDED.first_purchase_only,
+        new_customer_days = EXCLUDED.new_customer_days,
+        branch_ids = EXCLUDED.branch_ids,
+        payment_form_codes = EXCLUDED.payment_form_codes,
+        payment_form_code = EXCLUDED.payment_form_code,
+        active_weekdays = EXCLUDED.active_weekdays,
+        start_time = EXCLUDED.start_time,
+        end_time = EXCLUDED.end_time,
+        birthday_only = EXCLUDED.birthday_only,
+        max_discount_per_day = EXCLUDED.max_discount_per_day,
+        max_volume_per_day = EXCLUDED.max_volume_per_day,
+        max_quantity_per_item = EXCLUDED.max_quantity_per_item,
+        redemptions_per_customer = EXCLUDED.redemptions_per_customer,
+        max_purchases_per_week = EXCLUDED.max_purchases_per_week,
+        max_purchases_per_month = EXCLUDED.max_purchases_per_month,
+        reusable = EXCLUDED.reusable,
+        discount_percent = EXCLUDED.discount_percent,
+        valid_from = EXCLUDED.valid_from,
+        valid_until = EXCLUDED.valid_until,
+        status = EXCLUDED.status,
+        cancelled_at = NULL
     `,
     [
-      created.id,
-      created.shortCode,
-      created.scope,
-      normalized.productCodes,
-      normalized.productCodes[0] ?? null,
-      created.productGroupCodes,
-      created.productGroupCodes[0] ?? null,
-      normalized.customerCodes,
-      normalized.customerCodes[0] ?? null,
-      created.customerGroupCodes,
-      created.customerGroupCodes[0] ?? null,
-      normalized.paymentFormCodes,
-      normalized.paymentFormCodes[0] ?? null,
-      created.discountPercent,
-      created.validFrom,
-      created.validUntil,
-      created.status,
-      created.createdAt,
-      created.cancelledAt,
+      authorization.id,
+      tenantScope.companyId,
+      tenantScope.sourceBranchId,
+      authorization.shortCode,
+      authorization.scope,
+      normalized.productCodes ?? [],
+      (normalized.productCodes ?? [])[0] ?? null,
+      authorization.productGroupCodes,
+      authorization.productGroupCodes[0] ?? null,
+      normalized.customerCodes ?? [],
+      (normalized.customerCodes ?? [])[0] ?? null,
+      authorization.customerGroupCodes,
+      authorization.customerGroupCodes[0] ?? null,
+      authorization.firstPurchaseOnly,
+      authorization.newCustomerDays,
+      authorization.selectedBranchIds,
+      normalized.paymentFormCodes ?? [],
+      (normalized.paymentFormCodes ?? [])[0] ?? null,
+      authorization.activeWeekdays,
+      authorization.startTime,
+      authorization.endTime,
+      authorization.birthdayOnly,
+      authorization.maxDiscountPerDay,
+      authorization.maxVolumePerDay,
+      authorization.maxQuantityPerItem,
+      authorization.redemptionsPerCustomer,
+      authorization.maxPurchasesPerWeek,
+      authorization.maxPurchasesPerMonth,
+      authorization.reusable,
+      authorization.discountPercent,
+      authorization.validFrom,
+      authorization.validUntil,
+      authorization.status,
+      authorization.createdAt,
+      authorization.cancelledAt,
     ],
   );
 
-  return withEffectiveStatus(created);
+  return withEffectiveStatus(authorization);
+}
+
+export async function listDiscountCodes(): Promise<DiscountAuthorization[]> {
+  await ensureDiscountSchema();
+  const result = await query<DiscountAuthorizationRow>(`
+    SELECT
+      da.id,
+      da.short_code,
+      da.scope,
+      ${buildProductCodesSql("da")} AS product_codes,
+      ${buildLegacyCompatibleArraySql("da", "product_group_codes", "product_group_code")} AS product_group_codes,
+      ${buildCustomerCodesSql("da")} AS customer_codes,
+      ${buildLegacyCompatibleArraySql("da", "customer_group_codes", "customer_group_code")} AS customer_group_codes,
+      COALESCE(da.first_purchase_only, FALSE) AS first_purchase_only,
+      da.new_customer_days,
+      COALESCE(da.branch_ids, ARRAY[]::text[]) AS branch_ids,
+      ${buildPaymentFormCodesSql("da")} AS payment_form_codes,
+      COALESCE(da.active_weekdays, ARRAY[]::text[]) AS active_weekdays,
+      da.start_time,
+      da.end_time,
+      COALESCE(da.birthday_only, FALSE) AS birthday_only,
+      da.max_discount_per_day,
+      da.max_volume_per_day,
+      da.max_quantity_per_item,
+      da.redemptions_per_customer,
+      da.max_purchases_per_week,
+      da.max_purchases_per_month,
+      COALESCE(da.reusable, FALSE) AS reusable,
+      da.discount_percent,
+      da.valid_from,
+      da.valid_until,
+      da.status,
+      da.created_at,
+      da.cancelled_at
+    FROM discount_authorization da
+    ORDER BY da.created_at DESC
+  `);
+
+  return result.rows
+    .map(mapRow)
+    .map(withEffectiveStatus)
+    .sort((first, second) => second.createdAt.localeCompare(first.createdAt));
+}
+
+export async function createDiscountCode(
+  input: CreateDiscountCodeInput,
+): Promise<DiscountAuthorization> {
+  const shortCode = await generateUniqueShortCode(await getExistingCodes());
+  return upsertDiscountCode(shortCode, input);
+}
+
+export async function upsertDiscountCode(
+  shortCode: string,
+  input: CreateDiscountCodeInput,
+  tenantScope: DiscountCodeTenantScope = { companyId: null, sourceBranchId: null },
+): Promise<DiscountAuthorization> {
+  const { normalized, authorization } = await buildOperationalAuthorization(shortCode, input);
+  return persistOperationalAuthorization(authorization, normalized, tenantScope);
+}
+
+export async function getDiscountCodeTenantScope(shortCode: string): Promise<DiscountCodeTenantScope | null> {
+  const code = shortCode.trim().toUpperCase();
+  if (!code) {
+    return null;
+  }
+
+  await ensureDiscountSchema();
+  const result = await query<{ company_id: string | null; source_branch_id: string | null }>(
+    `
+      SELECT company_id, source_branch_id
+      FROM discount_authorization
+      WHERE short_code = $1
+      LIMIT 1
+    `,
+    [code],
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    companyId: row.company_id ?? null,
+    sourceBranchId: row.source_branch_id ?? null,
+  };
 }
 
 export async function resolveDiscountCode(shortCode: string): Promise<ResolveDiscountCodeResponse> {
@@ -468,7 +826,21 @@ export async function resolveDiscountCode(shortCode: string): Promise<ResolveDis
         ${buildLegacyCompatibleArraySql("da", "product_group_codes", "product_group_code")} AS product_group_codes,
         ${buildCustomerCodesSql("da")} AS customer_codes,
         ${buildLegacyCompatibleArraySql("da", "customer_group_codes", "customer_group_code")} AS customer_group_codes,
+        COALESCE(da.first_purchase_only, FALSE) AS first_purchase_only,
+        da.new_customer_days,
+        COALESCE(da.branch_ids, ARRAY[]::text[]) AS branch_ids,
         ${buildPaymentFormCodesSql("da")} AS payment_form_codes,
+        COALESCE(da.active_weekdays, ARRAY[]::text[]) AS active_weekdays,
+        da.start_time,
+        da.end_time,
+        COALESCE(da.birthday_only, FALSE) AS birthday_only,
+        da.max_discount_per_day,
+        da.max_volume_per_day,
+        da.max_quantity_per_item,
+        da.redemptions_per_customer,
+        da.max_purchases_per_week,
+        da.max_purchases_per_month,
+        COALESCE(da.reusable, FALSE) AS reusable,
         da.discount_percent,
         da.valid_from,
         da.valid_until,
@@ -519,7 +891,21 @@ export async function cancelDiscountCode(shortCode: string): Promise<DiscountAut
         customer_code,
         customer_group_codes,
         customer_group_code,
+        first_purchase_only,
+        new_customer_days,
+        branch_ids,
         payment_form_codes,
+        active_weekdays,
+        start_time,
+        end_time,
+        birthday_only,
+        max_discount_per_day,
+        max_volume_per_day,
+        max_quantity_per_item,
+        redemptions_per_customer,
+        max_purchases_per_week,
+        max_purchases_per_month,
+        reusable,
         discount_percent,
         valid_from,
         valid_until,

@@ -9,4 +9,5 @@ export type ReferenceDataType =
   | "product-groups"
   | "customer-groups"
   | "customers"
+  | "branches"
   | "payment-forms";

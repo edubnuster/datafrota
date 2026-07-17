@@ -1,34 +1,30 @@
 import { create } from "zustand";
-import type { AdminSession, Company, CreateCompanyInput } from "@/types/saas";
+import type {
+  Company,
+  CreateCompanyInput,
+  SaasAdminSession,
+  SaasSession,
+  UpdateSaasAdminAccountInput,
+} from "@/types/saas";
+import {
+  fetchAdminAccount,
+  createCompany as createCompanyRequest,
+  deleteCompany as deleteCompanyRequest,
+  fetchCompanies,
+  updateAdminAccount as updateAdminAccountRequest,
+  updateCompany as updateCompanyRequest,
+} from "@/utils/api";
 
 const SESSION_KEY = "datafrota-saas-session";
 
-const seedCompanies: Company[] = [
-  {
-    id: "company-1",
-    tradeName: "Databrev",
-    cnpj: "42.971.554/0001-27",
-    phone: "(47) 99154-8827",
-    address: "Rua das Flores, 1080 - Centro, Blumenau - SC",
-    adminName: "Volnei Girardi",
-    adminEmail: "volnei@databrev.com.br",
-    temporaryPassword: "Admin@123",
-    status: "ativa",
-    plan: "enterprise",
-    activatedAt: "2026-07-11",
-    expiresAt: "2026-08-11",
-    createdAt: "2026-07-11",
-    domain: "tenant.databrev.com.br",
-    monthlyRevenue: 599.9,
-  },
-];
-
-const defaultSession: AdminSession = {
-  id: "saas-admin-1",
-  name: "Volnei Girardi",
-  email: "adm@databrev.com.br",
-  role: "saas_admin",
-};
+function buildAdminSession(account: { id: string; name: string; email: string }): SaasAdminSession {
+  return {
+    id: account.id,
+    name: account.name,
+    email: account.email,
+    role: "saas_admin",
+  };
+}
 
 function getInitialSession() {
   if (typeof window === "undefined") {
@@ -42,14 +38,14 @@ function getInitialSession() {
   }
 
   try {
-    return JSON.parse(raw) as AdminSession;
+    return JSON.parse(raw) as SaasSession;
   } catch {
     window.localStorage.removeItem(SESSION_KEY);
     return null;
   }
 }
 
-function persistSession(session: AdminSession | null) {
+function persistSession(session: SaasSession | null) {
   if (typeof window === "undefined") {
     return;
   }
@@ -63,39 +59,103 @@ function persistSession(session: AdminSession | null) {
 }
 
 interface SaasStoreState {
-  session: AdminSession | null;
+  session: SaasSession | null;
   companies: Company[];
+  companiesLoaded: boolean;
+  companiesLoading: boolean;
+  companiesError: string | null;
   search: string;
   authError: string | null;
   login(email: string, password: string): Promise<boolean>;
   logout(): void;
   clearAuthError(): void;
   setSearch(search: string): void;
-  createCompany(input: CreateCompanyInput): Company;
+  loadCompanies(force?: boolean): Promise<void>;
+  createCompany(input: CreateCompanyInput): Promise<Company>;
+  updateCompany(companyId: string, input: CreateCompanyInput): Promise<Company | null>;
+  deleteCompany(companyId: string): Promise<Company | null>;
+  updateAdminAccount(input: UpdateSaasAdminAccountInput): Promise<SaasAdminSession>;
 }
 
-export const useSaasStore = create<SaasStoreState>((set) => ({
+export const useSaasStore = create<SaasStoreState>((set, get) => ({
   session: getInitialSession(),
-  companies: seedCompanies,
+  companies: [],
+  companiesLoaded: false,
+  companiesLoading: false,
+  companiesError: null,
   search: "",
   authError: null,
   async login(email, password) {
     const normalizedEmail = email.trim().toLowerCase();
-    const isValid =
-      normalizedEmail === defaultSession.email && password === "adm@databrev.com.br";
 
-    if (!isValid) {
-      set({ authError: "Credenciais inválidas. Use o acesso administrativo do SaaS." });
+    try {
+      const adminAccount = await fetchAdminAccount();
+      const adminSession = buildAdminSession(adminAccount);
+      const isAdminLogin =
+        normalizedEmail === adminSession.email.trim().toLowerCase() && password === adminAccount.password;
+
+      if (isAdminLogin) {
+        persistSession(adminSession);
+        set({ session: adminSession, authError: null });
+        return true;
+      }
+
+      const companies = await fetchCompanies();
+      const company = companies.find(
+        (item) =>
+          item.adminEmail.trim().toLowerCase() === normalizedEmail &&
+          item.temporaryPassword === password,
+      );
+
+      if (!company) {
+        set({
+          authError: "Credenciais invalidas. Use o acesso administrativo do SaaS ou o login da empresa.",
+        });
+        return false;
+      }
+
+      const companySession: SaasSession = {
+        id: `company-admin-${company.id}`,
+        name: company.adminName,
+        email: company.adminEmail,
+        role: "company_admin",
+        companyId: company.id,
+        companyName: company.tradeName,
+        companyPlan: company.plan,
+        companyStatus: company.status,
+        companyDomain: company.domain,
+        companyExpiresAt: company.expiresAt,
+      };
+
+      persistSession(companySession);
+      set({
+        session: companySession,
+        authError: null,
+        companies,
+        companiesLoaded: true,
+        companiesLoading: false,
+        companiesError: null,
+      });
+      return true;
+    } catch (error) {
+      set({
+        authError:
+          error instanceof Error ? error.message : "Nao foi possivel validar o acesso da empresa.",
+      });
       return false;
     }
-
-    persistSession(defaultSession);
-    set({ session: defaultSession, authError: null });
-    return true;
   },
   logout() {
     persistSession(null);
-    set({ session: null, authError: null });
+    set({
+      session: null,
+      authError: null,
+      companies: [],
+      companiesLoaded: false,
+      companiesLoading: false,
+      companiesError: null,
+      search: "",
+    });
   },
   clearAuthError() {
     set({ authError: null });
@@ -103,30 +163,82 @@ export const useSaasStore = create<SaasStoreState>((set) => ({
   setSearch(search) {
     set({ search });
   },
-  createCompany(input) {
-    const company: Company = {
-      id: `company-${Date.now()}`,
-      tradeName: input.tradeName,
-      cnpj: input.cnpj,
-      phone: input.phone,
-      address: input.address,
-      adminName: input.adminName,
-      adminEmail: input.adminEmail,
-      temporaryPassword: input.temporaryPassword,
-      status: input.status,
-      plan: input.plan,
-      activatedAt: input.activatedAt,
-      expiresAt: input.expiresAt,
-      createdAt: new Date().toISOString().slice(0, 10),
-      domain: `${input.tradeName.toLowerCase().replace(/\s+/g, "")}.tenant.datafrota.app`,
-      monthlyRevenue:
-        input.plan === "enterprise" ? 599.9 : input.plan === "professional" ? 349.9 : 199.9,
-    };
+  async loadCompanies(force = false) {
+    let shouldLoad = true;
 
+    set((state) => {
+      shouldLoad = force || (!state.companiesLoaded && !state.companiesLoading);
+
+      if (!shouldLoad) {
+        return state;
+      }
+
+      return {
+        companiesLoading: true,
+        companiesError: null,
+      };
+    });
+
+    if (!shouldLoad) {
+      return;
+    }
+
+    try {
+      const companies = await fetchCompanies();
+      set({
+        companies,
+        companiesLoaded: true,
+        companiesLoading: false,
+        companiesError: null,
+      });
+    } catch (error) {
+      set({
+        companiesLoading: false,
+        companiesError:
+          error instanceof Error ? error.message : "Nao foi possivel carregar as empresas.",
+      });
+    }
+  },
+  async createCompany(input) {
+    const company = await createCompanyRequest(input);
     set((state) => ({
-      companies: [company, ...state.companies],
+      companies: [company, ...state.companies.filter((item) => item.id !== company.id)],
+      companiesLoaded: true,
+      companiesError: null,
     }));
-
     return company;
+  },
+  async updateCompany(companyId, input) {
+    const company = await updateCompanyRequest(companyId, input);
+    set((state) => ({
+      companies: state.companies.map((item) => (item.id === companyId ? company : item)),
+      companiesLoaded: true,
+      companiesError: null,
+    }));
+    return company;
+  },
+  async deleteCompany(companyId) {
+    const company = await deleteCompanyRequest(companyId);
+    set((state) => ({
+      companies: state.companies.filter((item) => item.id !== companyId),
+      companiesLoaded: true,
+      companiesError: null,
+    }));
+    return company;
+  },
+  async updateAdminAccount(input) {
+    const currentSession = get().session;
+    const nextAccount = await updateAdminAccountRequest(input);
+    const nextSession = buildAdminSession(nextAccount);
+    persistSession(nextSession);
+
+    set({
+      session:
+        currentSession?.role === "saas_admin"
+          ? nextSession
+          : currentSession,
+    });
+
+    return nextSession;
   },
 }));

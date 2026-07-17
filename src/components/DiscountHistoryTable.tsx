@@ -76,7 +76,11 @@ export default function DiscountHistoryTable({
                 </div>
 
                 <div>
-                  {item.customerCodes.length > 0
+                  {item.firstPurchaseOnly
+                    ? "Clientes novos · primeira compra"
+                    : item.newCustomerDays !== null
+                    ? `Clientes novos · ${item.newCustomerDays} dia(s)`
+                    : item.customerCodes.length > 0
                     ? `Clientes ${formatCodeList(item.customerCodes)}`
                     : item.customerGroupCodes.length > 0
                       ? `Grupos ${formatCodeList(item.customerGroupCodes)}`

@@ -1,18 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
-import { Building2, CircleAlert, X } from "lucide-react";
-import type { CreateCompanyInput } from "@/types/saas";
+import { Building2, CircleAlert, PlugZap, Trash2, X } from "lucide-react";
+import type { Company, CreateCompanyInput } from "@/types/saas";
+import { formatCnpj, formatPhone, validateCompanyInput } from "../../../shared/company";
+import ModernDateInput from "@/components/ModernDateInput";
+import CompactComboBox from "./CompactComboBox";
 
 interface CompanyDialogProps {
   open: boolean;
+  company?: Company | null;
   onClose(): void;
-  onSubmit(input: CreateCompanyInput): void;
+  onSubmit(input: CreateCompanyInput): Promise<void>;
+  onDelete?(company: Company): Promise<void>;
 }
 
 const initialForm: CreateCompanyInput = {
   tradeName: "",
   cnpj: "",
   phone: "",
-  address: "",
   adminName: "",
   adminEmail: "",
   temporaryPassword: "",
@@ -20,7 +24,21 @@ const initialForm: CreateCompanyInput = {
   plan: "starter",
   activatedAt: "",
   expiresAt: "",
+  selectedBranchIds: [],
 };
+
+const planOptions = [
+  { value: "starter", label: "Starter" },
+  { value: "professional", label: "Professional" },
+  { value: "enterprise", label: "Enterprise" },
+] as const;
+
+const statusOptions = [
+  { value: "trial", label: "Trial" },
+  { value: "ativa", label: "Ativa" },
+  { value: "suspensa", label: "Suspensa" },
+  { value: "vencida", label: "Vencida" },
+] as const;
 
 function Field({
   label,
@@ -42,39 +60,119 @@ function Field({
   );
 }
 
-export default function CompanyDialog({ open, onClose, onSubmit }: CompanyDialogProps) {
+function toFormValues(company: Company): CreateCompanyInput {
+  return {
+    tradeName: company.tradeName,
+    cnpj: company.cnpj,
+    phone: company.phone,
+    adminName: company.adminName,
+    adminEmail: company.adminEmail,
+    temporaryPassword: company.temporaryPassword,
+    status: company.status,
+    plan: company.plan,
+    activatedAt: company.activatedAt,
+    expiresAt: company.expiresAt,
+    selectedBranchIds: company.selectedBranchIds,
+  };
+}
+
+export default function CompanyDialog({ open, company, onClose, onSubmit, onDelete }: CompanyDialogProps) {
   const [form, setForm] = useState<CreateCompanyInput>(initialForm);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const isEditing = Boolean(company);
+  const validationErrors = useMemo(() => validateCompanyInput(form), [form]);
 
   useEffect(() => {
     if (!open) {
       setForm(initialForm);
       setError(null);
+      setSubmitting(false);
+      setDeleting(false);
+      return;
     }
-  }, [open]);
+
+    setForm(company ? toFormValues(company) : initialForm);
+    setError(null);
+    setSubmitting(false);
+    setDeleting(false);
+  }, [company, open]);
 
   const isValid = useMemo(() => {
-    return Object.values(form).every((value) => String(value).trim().length > 0);
-  }, [form]);
+    return validationErrors.length === 0;
+  }, [validationErrors]);
 
   if (!open) {
     return null;
   }
 
-  function updateField<K extends keyof CreateCompanyInput>(field: K, value: CreateCompanyInput[K]) {
-    setForm((current) => ({ ...current, [field]: value }));
+  function updateForm(updates: Partial<CreateCompanyInput>) {
+    setForm((current) => ({ ...current, ...updates }));
   }
 
-  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function updateField<K extends keyof CreateCompanyInput>(field: K, value: CreateCompanyInput[K]) {
+    updateForm({ [field]: value } as Pick<CreateCompanyInput, K>);
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (!isValid) {
-      setError("Preencha todos os campos obrigatorios antes de cadastrar a empresa.");
+      setError(
+        isEditing
+          ? "Preencha todos os campos obrigatorios antes de salvar a empresa."
+          : "Preencha todos os campos obrigatorios antes de cadastrar a empresa.",
+      );
       return;
     }
 
-    onSubmit(form);
-    onClose();
+    try {
+      setSubmitting(true);
+      await onSubmit({
+        ...form,
+        cnpj: formatCnpj(form.cnpj),
+        phone: formatPhone(form.phone),
+      });
+      onClose();
+    } catch (submitError) {
+      setError(
+        submitError instanceof Error
+          ? submitError.message
+          : "Nao foi possivel salvar a empresa no banco.",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!company || !onDelete) {
+      return;
+    }
+
+    const shouldDelete = window.confirm(
+      `Tem certeza que deseja excluir o cadastro da empresa ${company.tradeName}?`,
+    );
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    try {
+      setError(null);
+      setDeleting(true);
+      await onDelete(company);
+      onClose();
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : "Nao foi possivel excluir a empresa no banco.",
+      );
+    } finally {
+      setDeleting(false);
+    }
   }
 
   return (
@@ -89,9 +187,13 @@ export default function CompanyDialog({ open, onClose, onSubmit }: CompanyDialog
               <Building2 className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="text-xl font-semibold tracking-tight text-slate-950">Nova Empresa</h2>
+              <h2 className="text-xl font-semibold tracking-tight text-slate-950">
+                {isEditing ? "Editar Empresa" : "Nova Empresa"}
+              </h2>
               <p className="text-sm text-slate-500">
-                Cadastre um novo tenant com admin principal e dados contratuais.
+                {isEditing
+                  ? "Atualize os dados do tenant, administrador principal e contrato."
+                  : "Cadastre um novo tenant com admin principal e dados contratuais."}
               </p>
             </div>
           </div>
@@ -99,6 +201,7 @@ export default function CompanyDialog({ open, onClose, onSubmit }: CompanyDialog
           <button
             type="button"
             onClick={onClose}
+            disabled={submitting || deleting}
             className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-slate-300 hover:text-slate-900"
             aria-label="Fechar modal"
           >
@@ -112,15 +215,23 @@ export default function CompanyDialog({ open, onClose, onSubmit }: CompanyDialog
           </Field>
 
           <Field label="CNPJ" required>
-            <input className="saas-input" value={form.cnpj} onChange={(e) => updateField("cnpj", e.target.value)} />
+            <input
+              className="saas-input"
+              inputMode="numeric"
+              placeholder="00.000.000/0000-00"
+              value={form.cnpj}
+              onChange={(e) => updateField("cnpj", formatCnpj(e.target.value))}
+            />
           </Field>
 
           <Field label="Telefone" required>
-            <input className="saas-input" value={form.phone} onChange={(e) => updateField("phone", e.target.value)} />
-          </Field>
-
-          <Field label="Endereco" required>
-            <input className="saas-input" value={form.address} onChange={(e) => updateField("address", e.target.value)} />
+            <input
+              className="saas-input"
+              inputMode="tel"
+              placeholder="(00) 00000-0000"
+              value={form.phone}
+              onChange={(e) => updateField("phone", formatPhone(e.target.value))}
+            />
           </Field>
 
           <Field label="Nome do admin" required>
@@ -148,29 +259,48 @@ export default function CompanyDialog({ open, onClose, onSubmit }: CompanyDialog
           </div>
 
           <Field label="Plano" required>
-            <select className="saas-input" value={form.plan} onChange={(e) => updateField("plan", e.target.value as CreateCompanyInput["plan"])}>
-              <option value="starter">Starter</option>
-              <option value="professional">Professional</option>
-              <option value="enterprise">Enterprise</option>
-            </select>
+            <CompactComboBox
+              value={form.plan}
+              options={[...planOptions]}
+              onChange={(value) => updateField("plan", value as CreateCompanyInput["plan"])}
+            />
           </Field>
 
           <Field label="Status" required>
-            <select className="saas-input" value={form.status} onChange={(e) => updateField("status", e.target.value as CreateCompanyInput["status"])}>
-              <option value="trial">Trial</option>
-              <option value="ativa">Ativa</option>
-              <option value="suspensa">Suspensa</option>
-              <option value="vencida">Vencida</option>
-            </select>
+            <CompactComboBox
+              value={form.status}
+              options={[...statusOptions]}
+              onChange={(value) => updateField("status", value as CreateCompanyInput["status"])}
+            />
           </Field>
 
           <Field label="Data de ativacao" required>
-            <input className="saas-input" type="date" value={form.activatedAt} onChange={(e) => updateField("activatedAt", e.target.value)} />
+            <ModernDateInput type="date" value={form.activatedAt} onChange={(value) => updateField("activatedAt", value)} />
           </Field>
 
           <Field label="Data de vencimento" required>
-            <input className="saas-input" type="date" value={form.expiresAt} onChange={(e) => updateField("expiresAt", e.target.value)} />
+            <ModernDateInput type="date" value={form.expiresAt} onChange={(value) => updateField("expiresAt", value)} />
           </Field>
+        </div>
+
+        <div className="mt-6 rounded-[28px] border border-violet-100 bg-violet-50/70 p-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-violet-100 text-violet-700">
+              <PlugZap className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-base font-semibold text-slate-950">Filiais descobertas automaticamente</p>
+              <p className="mt-1 text-sm text-slate-600">
+                O tenant agora nasce sem exigir filiais manuais. A rede de empresas do cliente e a empresa local do posto
+                serao sincronizadas automaticamente quando o primeiro PDV com app Python for ativado.
+              </p>
+              <p className="mt-3 text-sm text-violet-700">
+                {form.selectedBranchIds.length > 0
+                  ? `${form.selectedBranchIds.length} filial(is) ativa(s) ja descobertas para esta empresa.`
+                  : "Nenhuma filial sincronizada ainda. Gere um codigo bootstrap e ative o primeiro PDV para iniciar a descoberta."}
+              </p>
+            </div>
+          </div>
         </div>
 
         {error ? (
@@ -180,18 +310,31 @@ export default function CompanyDialog({ open, onClose, onSubmit }: CompanyDialog
         ) : null}
 
         <div className="mt-6 flex items-center justify-end gap-3">
+          {isEditing && onDelete ? (
+            <button
+              type="button"
+              onClick={handleDelete}
+              disabled={submitting || deleting}
+              className="inline-flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              <Trash2 className="h-4 w-4" />
+              {deleting ? "Excluindo..." : "Excluir cadastro"}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onClose}
+            disabled={submitting || deleting}
             className="rounded-full px-4 py-2 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
           >
             Cancelar
           </button>
           <button
             type="submit"
+            disabled={submitting || deleting}
             className="rounded-full bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:bg-violet-700"
           >
-            Cadastrar
+            {submitting ? "Salvando..." : isEditing ? "Salvar Alteracoes" : "Cadastrar"}
           </button>
         </div>
       </form>

@@ -14,6 +14,7 @@ describe("discount rules", () => {
         productGroupCodes: null,
         customerCodes: null,
         customerGroupCodes: null,
+        firstPurchaseOnly: false,
         paymentFormCodes: [],
         discountPercent: 10,
       }),
@@ -27,6 +28,7 @@ describe("discount rules", () => {
         productGroupCodes: null,
         customerCodes: null,
         customerGroupCodes: null,
+        firstPurchaseOnly: false,
         paymentFormCodes: [],
         discountPercent: 10,
       }),
@@ -39,6 +41,7 @@ describe("discount rules", () => {
       productGroupCodes: ["ABC"],
       customerCodes: null,
       customerGroupCodes: null,
+      firstPurchaseOnly: false,
       paymentFormCodes: [],
       discountPercent: 10,
     });
@@ -52,6 +55,7 @@ describe("discount rules", () => {
       productGroupCodes: null,
       customerCodes: ["9"],
       customerGroupCodes: ["7"],
+      firstPurchaseOnly: false,
       paymentFormCodes: [],
       discountPercent: 10,
     });
@@ -82,10 +86,143 @@ describe("discount rules", () => {
       productGroupCodes: null,
       customerCodes: [" 9 ", "9"],
       customerGroupCodes: null,
+      firstPurchaseOnly: false,
       paymentFormCodes: [" 12 ", "12", "34 "],
       discountPercent: 5,
     });
 
     expect(issues).toEqual([]);
+  });
+
+  it("retorna erro quando primeira compra e combinada com clientes especificos", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: null,
+      productGroupCodes: null,
+      customerCodes: ["9"],
+      customerGroupCodes: null,
+      firstPurchaseOnly: true,
+      paymentFormCodes: [],
+      discountPercent: 10,
+    });
+
+    expect(issues).toContain("A regra de primeira compra nao pode ser combinada com clientes ou grupos especificos.");
+  });
+
+  it("aceita regra de clientes novos por dias quando o valor e inteiro positivo", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: null,
+      productGroupCodes: null,
+      customerCodes: null,
+      customerGroupCodes: null,
+      firstPurchaseOnly: false,
+      newCustomerDays: 30,
+      paymentFormCodes: [],
+      discountPercent: 10,
+    });
+
+    expect(issues).toEqual([]);
+  });
+
+  it("retorna erro quando a regra de clientes novos por dias nao e inteira e positiva", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: null,
+      productGroupCodes: null,
+      customerCodes: null,
+      customerGroupCodes: null,
+      firstPurchaseOnly: false,
+      newCustomerDays: 0,
+      paymentFormCodes: [],
+      discountPercent: 10,
+    });
+
+    expect(issues).toContain("A regra de clientes novos em dias precisa ser um numero inteiro maior que zero.");
+  });
+
+  it("retorna erro quando clientes novos por dias e combinado com clientes especificos", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: null,
+      productGroupCodes: null,
+      customerCodes: ["9"],
+      customerGroupCodes: null,
+      firstPurchaseOnly: false,
+      newCustomerDays: 15,
+      paymentFormCodes: [],
+      discountPercent: 10,
+    });
+
+    expect(issues).toContain(
+      "A regra de clientes novos por dias nao pode ser combinada com clientes ou grupos especificos.",
+    );
+  });
+
+  it("aceita restricoes operacionais de filial, dia e reutilizacao", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: ["123"],
+      productGroupCodes: null,
+      customerCodes: null,
+      customerGroupCodes: null,
+      firstPurchaseOnly: false,
+      selectedBranchIds: ["1", "2"],
+      paymentFormCodes: [],
+      activeWeekdays: ["seg", "ter"],
+      maxDiscountPerDay: 50,
+      maxVolumePerDay: 100,
+      maxQuantityPerItem: 20,
+      redemptionsPerCustomer: 2,
+      maxPurchasesPerWeek: 3,
+      maxPurchasesPerMonth: 8,
+      reusable: true,
+      discountPercent: 10,
+    });
+
+    expect(issues).toEqual([]);
+  });
+
+  it("retorna erro quando um limite operacional invalido e informado", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: ["123"],
+      productGroupCodes: null,
+      customerCodes: null,
+      customerGroupCodes: null,
+      firstPurchaseOnly: false,
+      paymentFormCodes: [],
+      redemptionsPerCustomer: 0,
+      discountPercent: 10,
+    });
+
+    expect(issues).toContain("O limite de resgates por cliente deve ser um numero inteiro maior que zero.");
+  });
+
+  it("aceita horario e aniversario quando o intervalo e valido", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: ["123"],
+      productGroupCodes: null,
+      customerCodes: null,
+      customerGroupCodes: null,
+      firstPurchaseOnly: false,
+      paymentFormCodes: [],
+      startTime: "08:00",
+      endTime: "18:00",
+      birthdayOnly: true,
+      discountPercent: 10,
+    });
+
+    expect(issues).toEqual([]);
+  });
+
+  it("retorna erro quando o intervalo de horario e invalido", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: ["123"],
+      productGroupCodes: null,
+      customerCodes: null,
+      customerGroupCodes: null,
+      firstPurchaseOnly: false,
+      paymentFormCodes: [],
+      startTime: "18:00",
+      endTime: "08:00",
+      discountPercent: 10,
+    });
+
+    expect(issues).toContain("O horario final nao pode ser menor que o horario inicial.");
   });
 });

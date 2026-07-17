@@ -61,6 +61,11 @@ export default function ResolveCodeCard({
             <p>Grupos de produto: {formatCodeList(result.authorization.productGroupCodes)}</p>
             <p>Clientes específicos: {formatCodeList(result.authorization.customerCodes)}</p>
             <p>Grupos de cliente: {formatCodeList(result.authorization.customerGroupCodes)}</p>
+            <p>Primeira compra: {result.authorization.firstPurchaseOnly ? "Sim" : "Nao"}</p>
+            <p>
+              Cliente novo por dias:{" "}
+              {result.authorization.newCustomerDays === null ? "Nao configurado" : result.authorization.newCustomerDays}
+            </p>
             <p>
               Formas de pagamento:{" "}
               {formatCodeList(result.authorization.paymentFormCodes)}

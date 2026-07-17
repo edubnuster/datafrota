@@ -13,7 +13,6 @@ const companies: Company[] = [
     tradeName: "Databrev",
     cnpj: "00.000.000/0001-00",
     phone: "(00) 90000-0000",
-    address: "Rua A",
     adminName: "Volnei",
     adminEmail: "volnei@databrev.com.br",
     temporaryPassword: "Admin@123",
@@ -24,13 +23,13 @@ const companies: Company[] = [
     createdAt: "2026-07-01",
     domain: "databrev.tenant.datafrota.app",
     monthlyRevenue: 599.9,
+    selectedBranchIds: ["101", "102"],
   },
   {
     id: "2",
     tradeName: "Posto Central",
     cnpj: "11.111.111/0001-11",
     phone: "(11) 91111-1111",
-    address: "Rua B",
     adminName: "Maria",
     adminEmail: "maria@posto.com.br",
     temporaryPassword: "Admin@123",
@@ -41,6 +40,7 @@ const companies: Company[] = [
     createdAt: "2026-07-05",
     domain: "postocentral.tenant.datafrota.app",
     monthlyRevenue: 199.9,
+    selectedBranchIds: ["201"],
   },
 ];
 

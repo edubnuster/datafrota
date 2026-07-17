@@ -1,7 +1,8 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { CirclePercent, CreditCard, Package, Tag, Users, X } from "lucide-react";
+import { CirclePercent, CreditCard, Package, Sparkles, Tag, Users, X } from "lucide-react";
 import type { CreateDiscountCodeInput } from "../../shared/discount";
 import type { ReferenceOption } from "../../shared/referenceData";
+import ModernDateInput from "@/components/ModernDateInput";
 import { useReferenceData } from "@/hooks/useReferenceData";
 
 type DiscountFormProps = {
@@ -24,6 +25,8 @@ type FormState = {
   customers: SelectedLookup[];
   customerGroupSearch: string;
   customerGroups: SelectedLookup[];
+  firstPurchaseOnly: boolean;
+  newCustomerDays: string;
   paymentFormSearch: string;
   paymentForms: SelectedLookup[];
   discountPercent: string;
@@ -40,6 +43,8 @@ const initialState: FormState = {
   customers: [],
   customerGroupSearch: "",
   customerGroups: [],
+  firstPurchaseOnly: false,
+  newCustomerDays: "",
   paymentFormSearch: "",
   paymentForms: [],
   discountPercent: "",
@@ -53,6 +58,8 @@ function buildPayload(form: FormState): CreateDiscountCodeInput {
     productGroupCodes: form.productGroups.map((item) => item.value),
     customerCodes: form.customers.map((item) => item.value),
     customerGroupCodes: form.customerGroups.map((item) => item.value),
+    firstPurchaseOnly: form.firstPurchaseOnly,
+    newCustomerDays: form.firstPurchaseOnly || !form.newCustomerDays.trim() ? null : Number(form.newCustomerDays),
     paymentFormCodes: form.paymentForms.map((item) => item.value),
     discountPercent: Number(form.discountPercent),
     validFrom: form.validFrom ? new Date(form.validFrom).toISOString() : null,
@@ -122,12 +129,12 @@ function SearchPickField({
         {label}
       </span>
 
-      <div className="rounded-2xl border border-slate-700 bg-slate-900 px-3 py-3 transition focus-within:border-cyan-400">
-        <div className="flex flex-wrap gap-2">
+      <div className="rounded-2xl border border-slate-700 bg-slate-900 px-3 py-2.5 transition focus-within:border-cyan-400">
+        <div className="flex flex-wrap gap-1.5">
           {selectedItems.map((item) => (
             <span
               key={item.value}
-              className="inline-flex items-center gap-2 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-100"
+              className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 text-[11px] leading-4 text-cyan-100"
             >
               {item.code} - {item.name}
               <button
@@ -145,7 +152,7 @@ function SearchPickField({
             value={search}
             onChange={(event) => onSearchChange(event.target.value)}
             placeholder={selectedItems.length > 0 ? filledPlaceholder : basePlaceholder}
-            className="min-w-[220px] flex-1 bg-transparent px-2 py-1 text-white outline-none placeholder:text-slate-500"
+            className="min-w-[220px] flex-1 bg-transparent px-2 py-1 text-sm leading-5 text-white outline-none placeholder:text-slate-500"
           />
         </div>
       </div>
@@ -179,7 +186,7 @@ function SearchPickField({
               key={option.value ?? option.code}
               type="button"
               onClick={() => onAdd(option)}
-              className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800"
+              className="flex w-full items-center justify-between rounded-xl px-3 py-1.5 text-left text-xs leading-5 text-slate-200 transition hover:bg-slate-800"
             >
               <span>
                 {option.code} - {option.name}
@@ -223,6 +230,8 @@ export default function DiscountForm({ submitting, onSubmit }: DiscountFormProps
 
     return "Sem produto ou grupo informado, o desconto valerá para todos os produtos.";
   }, [form.products, form.productGroups]);
+
+  const hasSpecificCustomerSelection = form.customers.length > 0 || form.customerGroups.length > 0;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -302,6 +311,8 @@ export default function DiscountForm({ submitting, onSubmit }: DiscountFormProps
       customers: addUniqueItem(current.customers, option),
       customerGroupSearch: "",
       customerGroups: [],
+      firstPurchaseOnly: false,
+      newCustomerDays: "",
     }));
   }
 
@@ -327,6 +338,8 @@ export default function DiscountForm({ submitting, onSubmit }: DiscountFormProps
       customerGroups: addUniqueItem(current.customerGroups, option),
       customerSearch: "",
       customers: [],
+      firstPurchaseOnly: false,
+      newCustomerDays: "",
     }));
   }
 
@@ -340,6 +353,17 @@ export default function DiscountForm({ submitting, onSubmit }: DiscountFormProps
   function clearCustomerGroup() {
     setForm((current) => ({
       ...current,
+      customerGroupSearch: "",
+      customerGroups: [],
+    }));
+  }
+
+  function toggleFirstPurchaseOnly() {
+    setForm((current) => ({
+      ...current,
+      firstPurchaseOnly: !current.firstPurchaseOnly,
+      customerSearch: "",
+      customers: [],
       customerGroupSearch: "",
       customerGroups: [],
     }));
@@ -474,6 +498,69 @@ export default function DiscountForm({ submitting, onSubmit }: DiscountFormProps
           />
         </div>
 
+        <button
+          type="button"
+          onClick={toggleFirstPurchaseOnly}
+          className={[
+            "flex items-start justify-between gap-4 rounded-2xl border px-4 py-3 text-left transition",
+            form.firstPurchaseOnly
+              ? "border-violet-400/40 bg-violet-500/10 text-violet-100"
+              : "border-slate-800 bg-slate-900/40 text-slate-300 hover:border-slate-700",
+          ].join(" ")}
+        >
+          <div className="grid gap-1">
+            <span className="flex items-center gap-2 text-sm font-medium">
+              <Sparkles className="h-4 w-4" />
+              Primeira compra
+            </span>
+            <span className="text-xs text-slate-400">
+              Libera o voucher apenas para clientes sem movimentacao.
+            </span>
+          </div>
+          <span
+            className={[
+              "relative mt-0.5 inline-flex h-6 w-11 rounded-full transition",
+              form.firstPurchaseOnly ? "bg-violet-500" : "bg-slate-700",
+            ].join(" ")}
+          >
+            <span
+              className={[
+                "absolute top-0.5 h-5 w-5 rounded-full bg-white transition",
+                form.firstPurchaseOnly ? "left-5" : "left-0.5",
+              ].join(" ")}
+            />
+          </span>
+        </button>
+
+        <label className="grid gap-2 text-sm text-slate-300">
+          <span className="flex items-center gap-2">
+            <Sparkles className="h-4 w-4 text-violet-300" />
+            Cliente novo por quantos dias?
+          </span>
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={form.newCustomerDays}
+            disabled={form.firstPurchaseOnly || hasSpecificCustomerSelection}
+            onChange={(event) => updateField("newCustomerDays", event.target.value)}
+            placeholder="Ex.: 30"
+            className={[
+              "w-full rounded-2xl border px-4 py-3 outline-none transition",
+              form.firstPurchaseOnly || hasSpecificCustomerSelection
+                ? "cursor-not-allowed border-slate-800 bg-slate-900/40 text-slate-500"
+                : "border-slate-700 bg-slate-900 text-white focus:border-violet-400",
+            ].join(" ")}
+          />
+          <span className="text-xs text-slate-500">
+            {form.firstPurchaseOnly
+              ? "Campo desabilitado porque o voucher fica restrito a primeira compra durante toda a validade."
+              : hasSpecificCustomerSelection
+                ? "Campo disponivel apenas quando o voucher nao estiver preso a clientes ou grupos especificos."
+                : "Permite reutilizar o voucher para clientes novos dentro da janela configurada para clientes sem movimentacao."}
+          </span>
+        </label>
+
         <div className="grid gap-4 md:grid-cols-2">
           <SearchPickField
             label="Formas de pagamento"
@@ -518,21 +605,21 @@ export default function DiscountForm({ submitting, onSubmit }: DiscountFormProps
         <div className="grid gap-4 md:grid-cols-2">
           <label className="grid min-w-0 gap-2 text-sm text-slate-300">
             <span>Início da validade</span>
-            <input
+            <ModernDateInput
+              variant="dark"
               type="datetime-local"
               value={form.validFrom}
-              onChange={(event) => updateField("validFrom", event.target.value)}
-              className="w-full min-w-0 rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-white outline-none transition focus:border-cyan-400"
+              onChange={(value) => updateField("validFrom", value)}
             />
           </label>
 
           <label className="grid min-w-0 gap-2 text-sm text-slate-300">
             <span>Fim da validade</span>
-            <input
+            <ModernDateInput
+              variant="dark"
               type="datetime-local"
               value={form.validUntil}
-              onChange={(event) => updateField("validUntil", event.target.value)}
-              className="w-full min-w-0 rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-white outline-none transition focus:border-cyan-400"
+              onChange={(value) => updateField("validUntil", value)}
             />
           </label>
         </div>

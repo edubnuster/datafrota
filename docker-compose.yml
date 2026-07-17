@@ -8,11 +8,16 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3001
-      PGHOST: ${PGHOST:-host.docker.internal}
+      PGHOST: ${DOCKER_PGHOST:-host.docker.internal}
       PGPORT: ${PGPORT:-5432}
       PGDATABASE: ${PGDATABASE:-frota}
       PGUSER: ${PGUSER:-postgres}
       PGPASSWORD: ${PGPASSWORD:-postgres}
+      SAAS_PGHOST: ${DOCKER_SAAS_PGHOST:-host.docker.internal}
+      SAAS_PGPORT: ${SAAS_PGPORT:-5432}
+      SAAS_PGDATABASE: ${SAAS_PGDATABASE:-datafrota}
+      SAAS_PGUSER: ${SAAS_PGUSER:-postgres}
+      SAAS_PGPASSWORD: ${SAAS_PGPASSWORD:-postgres}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

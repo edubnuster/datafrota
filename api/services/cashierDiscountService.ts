@@ -1,76 +1,14 @@
 import { ensureCashierSchema, query, withTransaction } from "../db.js";
-import { resolveDiscountCode } from "./discountCodeService.js";
+import { getDiscountCodeTenantScope, resolveDiscountCode } from "./discountCodeService.js";
+import { assertAgentVoucherAccess, type PdvAgentSession } from "./pdvAgentService.js";
 import type {
   CashierContext,
   CashierPendingAuthorization,
   CashierVoucherValidation,
   CreateCashierAuthorizationInput,
 } from "../../shared/cashier.js";
-import { readFileSync } from "node:fs";
-import http from "node:http";
-import https from "node:https";
-import { URL } from "node:url";
 
 const DEFAULT_PENDING_VALIDITY_MINUTES = 5;
-
-// #region debug-point shared:cashier-report
-function debugReportCashier(
-  hypothesisId: string,
-  location: string,
-  msg: string,
-  data: Record<string, unknown> = {},
-  runId = "pre-fix",
-): void {
-  let debugServerUrl = "http://127.0.0.1:7778/event";
-  let debugSessionId = "cashier-preauth-stuck";
-
-  try {
-    const envFile = readFileSync(".dbg/cashier-preauth-stuck.env", "utf8");
-    for (const line of envFile.split(/\r?\n/)) {
-      if (line.startsWith("DEBUG_SERVER_URL=")) {
-        debugServerUrl = line.split("=", 2)[1] || debugServerUrl;
-      } else if (line.startsWith("DEBUG_SESSION_ID=")) {
-        debugSessionId = line.split("=", 2)[1] || debugSessionId;
-      }
-    }
-  } catch {
-    // Ignora ausencia do arquivo de configuracao de debug local.
-  }
-
-  try {
-    const url = new URL(debugServerUrl);
-    const body = JSON.stringify({
-      sessionId: debugSessionId,
-      runId,
-      hypothesisId,
-      location,
-      msg,
-      data,
-      ts: Date.now(),
-    });
-    const client = url.protocol === "https:" ? https : http;
-    const req = client.request(
-      {
-        hostname: url.hostname,
-        port: url.port,
-        path: `${url.pathname}${url.search}`,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
-        },
-      },
-      (res) => {
-        res.resume();
-      },
-    );
-    req.on("error", () => undefined);
-    req.end(body);
-  } catch {
-    // Nao interrompe o fluxo principal se o relay de debug estiver indisponivel.
-  }
-}
-// #endregion
 
 type PendingAuthorizationRow = {
   grid: string | number;
@@ -87,6 +25,8 @@ type PendingAuthorizationRow = {
   customer_code: string | null;
   customer_group_codes: string[] | null;
   customer_group_code: string | null;
+  first_purchase_only: boolean | null;
+  new_customer_days: string | number | null;
   payment_form_codes: string[] | null;
   payment_form_code: string | null;
   percentual_desconto: string | number;
@@ -112,6 +52,24 @@ type CashierContextRow = {
   turno: number | string | null;
   usuario: string | null;
   station_source: CashierContext["stationSource"];
+};
+
+type CashierOperationalContext = {
+  saleDate: string | null;
+  turno: number | null;
+  usuario: string | null;
+  branchId: string | null;
+};
+
+type CashierOperationalContextRow = {
+  data: string | Date | null;
+  turno: number | string | null;
+  usuario: string | null;
+  empresa: string | number | null;
+};
+
+type LocalBranchRow = {
+  grid: string | number | null;
 };
 
 export class CashierVoucherError extends Error {
@@ -171,6 +129,11 @@ function mapPendingRow(row: PendingAuthorizationRow): CashierPendingAuthorizatio
     productGroupCodes: coalesceLegacyList(row.product_group_codes, row.product_group_code),
     customerCodes: coalesceLegacyList(row.customer_codes, row.customer_code),
     customerGroupCodes: coalesceLegacyList(row.customer_group_codes, row.customer_group_code),
+    firstPurchaseOnly: Boolean(row.first_purchase_only),
+    newCustomerDays:
+      row.new_customer_days === null || row.new_customer_days === undefined
+        ? null
+        : Number(row.new_customer_days),
     paymentFormCodes: coalesceLegacyList(row.payment_form_codes, row.payment_form_code),
     discountPercent: Number(row.percentual_desconto),
     discountValue: row.valor_desconto === null ? null : Number(row.valor_desconto),
@@ -217,7 +180,21 @@ type AuthorizationRestrictionsRow = {
   product_group_codes: string[];
   customer_codes: string[];
   customer_group_codes: string[];
+  first_purchase_only: boolean;
+  new_customer_days: number | null;
+  branch_ids: string[];
   payment_form_codes: string[];
+  active_weekdays: string[];
+  start_time: string | null;
+  end_time: string | null;
+  birthday_only: boolean;
+  max_discount_per_day: number | null;
+  max_volume_per_day: number | null;
+  max_quantity_per_item: number | null;
+  redemptions_per_customer: number | null;
+  max_purchases_per_week: number | null;
+  max_purchases_per_month: number | null;
+  reusable: boolean;
 };
 
 async function loadAuthorizationRestrictions(
@@ -230,7 +207,21 @@ async function loadAuthorizationRestrictions(
         ${buildLegacyCompatibleArraySql("product_group_codes", "product_group_code")} AS product_group_codes,
         ${buildLegacyCompatibleArraySql("customer_codes", "customer_code")} AS customer_codes,
         ${buildLegacyCompatibleArraySql("customer_group_codes", "customer_group_code")} AS customer_group_codes,
-        ${buildLegacyCompatibleArraySql("payment_form_codes", "payment_form_code")} AS payment_form_codes
+        COALESCE(first_purchase_only, FALSE) AS first_purchase_only,
+        new_customer_days,
+        COALESCE(branch_ids, ARRAY[]::text[]) AS branch_ids,
+        ${buildLegacyCompatibleArraySql("payment_form_codes", "payment_form_code")} AS payment_form_codes,
+        COALESCE(active_weekdays, ARRAY[]::text[]) AS active_weekdays,
+        start_time,
+        end_time,
+        COALESCE(birthday_only, FALSE) AS birthday_only,
+        max_discount_per_day,
+        max_volume_per_day,
+        max_quantity_per_item,
+        redemptions_per_customer,
+        max_purchases_per_week,
+        max_purchases_per_month,
+        COALESCE(reusable, FALSE) AS reusable
       FROM discount_authorization
       WHERE id = $1
       LIMIT 1
@@ -250,16 +241,85 @@ function normalizeStationHint(value?: string | null): string | null {
   return canonicalizeStation(value);
 }
 
+async function loadLocalBranchId(): Promise<string | null> {
+  const result = await query<LocalBranchRow>(
+    `
+      SELECT grid
+      FROM public.empresa_local
+      WHERE grid IS NOT NULL
+      ORDER BY sid ASC, grid DESC
+      LIMIT 1
+    `,
+  );
+
+  const grid = result.rows[0]?.grid;
+  return grid === null || grid === undefined ? null : String(grid);
+}
+
+async function mapCashierOperationalContextRow(
+  row?: CashierOperationalContextRow | null,
+): Promise<CashierOperationalContext> {
+  const localBranchId = await loadLocalBranchId();
+  return {
+    saleDate: row?.data ? new Date(row.data).toISOString() : null,
+    turno: row?.turno === null || row?.turno === undefined ? null : Number(row.turno),
+    usuario: row?.usuario ?? null,
+    branchId: localBranchId ?? (row?.empresa === null || row?.empresa === undefined ? null : String(row.empresa)),
+  };
+}
+
+async function loadCashierOperationalContext(conta?: string | null): Promise<CashierOperationalContext> {
+  const normalizedConta = normalizeText(conta);
+  if (!normalizedConta) {
+    return mapCashierOperationalContextRow(null);
+  }
+
+  const result = await query<CashierOperationalContextRow>(
+    `
+      SELECT data, turno, usuario, empresa
+      FROM public.caixa
+      WHERE conta = $1
+        AND fechamento IS NULL
+      ORDER BY data DESC NULLS LAST, abertura DESC NULLS LAST
+      LIMIT 1
+    `,
+    [normalizedConta],
+  );
+
+  return mapCashierOperationalContextRow(result.rows[0] ?? null);
+}
+
+function resolveWeekday(date: string): string {
+  return ["dom", "seg", "ter", "qua", "qui", "sex", "sab"][new Date(date).getDay()] ?? "dom";
+}
+
+function validateVoucherOperationalContext(
+  restrictions: AuthorizationRestrictionsRow,
+  operationalContext: CashierOperationalContext,
+): string | null {
+  if (restrictions.branch_ids.length > 0) {
+    if (!operationalContext.branchId) {
+      return "Nao foi possivel identificar a filial do caixa para validar o voucher.";
+    }
+
+    if (!restrictions.branch_ids.includes(operationalContext.branchId)) {
+      return "Voucher nao liberado para a filial deste caixa.";
+    }
+  }
+
+  if (restrictions.active_weekdays.length > 0) {
+    const baseDate = operationalContext.saleDate ?? new Date().toISOString();
+    const weekday = resolveWeekday(baseDate);
+    if (!restrictions.active_weekdays.includes(weekday)) {
+      return "Voucher nao liberado para o dia atual.";
+    }
+  }
+
+  return null;
+}
+
 export async function resolveCashierContext(stationHint?: string | null): Promise<CashierContext> {
   const normalizedHint = normalizeStationHint(stationHint);
-  // #region debug-point B:resolve-context-start
-  debugReportCashier(
-    "B",
-    "cashierDiscountService.ts:resolveCashierContext",
-    "[DEBUG] Inicio da resolucao de contexto do caixa",
-    { stationHint: normalizedHint },
-  );
-  // #endregion
   if (!normalizedHint) {
     throw new CashierVoucherError("Nao foi possivel identificar a estacao do terminal.", 400);
   }
@@ -296,14 +356,6 @@ export async function resolveCashierContext(stationHint?: string | null): Promis
   );
 
   if (result.rows.length === 0) {
-    // #region debug-point B:resolve-context-fallback
-    debugReportCashier(
-      "B",
-      "cashierDiscountService.ts:resolveCashierContext",
-      "[DEBUG] Nenhuma estacao encontrada, usando fallback pelo hint",
-      { stationHint: normalizedHint },
-    );
-    // #endregion
     return {
       conta: null,
       estacao: normalizedHint,
@@ -314,16 +366,7 @@ export async function resolveCashierContext(stationHint?: string | null): Promis
     };
   }
 
-  const context = mapCashierContextRow(result.rows[0]);
-  // #region debug-point B:resolve-context-success
-  debugReportCashier(
-    "B",
-    "cashierDiscountService.ts:resolveCashierContext",
-    "[DEBUG] Contexto do caixa resolvido com sucesso",
-    context as unknown as Record<string, unknown>,
-  );
-  // #endregion
-  return context;
+  return mapCashierContextRow(result.rows[0]);
 }
 
 function buildValidationPayload(shortCode: string, result: Awaited<ReturnType<typeof resolveDiscountCode>>): CashierVoucherValidation {
@@ -348,7 +391,21 @@ function buildValidationPayload(shortCode: string, result: Awaited<ReturnType<ty
       productGroupCodes: authorization.productGroupCodes,
       customerCodes: authorization.customerCodes,
       customerGroupCodes: authorization.customerGroupCodes,
+      firstPurchaseOnly: authorization.firstPurchaseOnly,
+      newCustomerDays: authorization.newCustomerDays,
+      selectedBranchIds: authorization.selectedBranchIds,
       paymentFormCodes: authorization.paymentFormCodes,
+      activeWeekdays: authorization.activeWeekdays,
+      startTime: authorization.startTime,
+      endTime: authorization.endTime,
+      birthdayOnly: authorization.birthdayOnly,
+      maxDiscountPerDay: authorization.maxDiscountPerDay,
+      maxVolumePerDay: authorization.maxVolumePerDay,
+      maxQuantityPerItem: authorization.maxQuantityPerItem,
+      redemptionsPerCustomer: authorization.redemptionsPerCustomer,
+      maxPurchasesPerWeek: authorization.maxPurchasesPerWeek,
+      maxPurchasesPerMonth: authorization.maxPurchasesPerMonth,
+      reusable: authorization.reusable,
       validFrom: authorization.validFrom,
       validUntil: authorization.validUntil,
       status: authorization.status,
@@ -390,25 +447,30 @@ function validateAuthorizeInput(input: CreateCashierAuthorizationInput): CreateC
   };
 }
 
-export async function validateCashierVoucher(shortCode: string): Promise<CashierVoucherValidation> {
+export async function validateCashierVoucher(
+  shortCode: string,
+  session?: PdvAgentSession,
+): Promise<CashierVoucherValidation> {
   const code = shortCode.trim().toUpperCase();
+  if (session) {
+    await assertAgentVoucherAccess(session, code);
+
+    const tenantScope = await getDiscountCodeTenantScope(code);
+    if (tenantScope?.companyId && tenantScope.companyId !== session.companyId) {
+      throw new CashierVoucherError("Este voucher nao pertence a empresa vinculada a este PDV.", 403);
+    }
+  }
+
   const result = await resolveDiscountCode(code);
   return buildValidationPayload(code, result);
 }
 
 export async function createCashierAuthorization(
   input: CreateCashierAuthorizationInput,
+  session?: PdvAgentSession,
 ): Promise<CashierPendingAuthorization> {
   const normalized = validateAuthorizeInput(input);
-  // #region debug-point C:create-auth-start
-  debugReportCashier(
-    "C",
-    "cashierDiscountService.ts:createCashierAuthorization",
-    "[DEBUG] Inicio da criacao de pre-autorizacao",
-    normalized as unknown as Record<string, unknown>,
-  );
-  // #endregion
-  const voucher = await validateCashierVoucher(normalized.shortCode);
+  const voucher = await validateCashierVoucher(normalized.shortCode, session);
 
   if (!voucher.found || !voucher.authorization) {
     const reasonMap: Record<NonNullable<CashierVoucherValidation["reason"]>, string> = {
@@ -439,14 +501,12 @@ export async function createCashierAuthorization(
   if (!cashierContext.estacao) {
     throw new CashierVoucherError("Nao foi possivel identificar a estacao do terminal.", 409);
   }
-  // #region debug-point C:create-auth-context
-  debugReportCashier(
-    "C",
-    "cashierDiscountService.ts:createCashierAuthorization",
-    "[DEBUG] Contexto definido para gravar a pre-autorizacao",
-    cashierContext as unknown as Record<string, unknown>,
-  );
-  // #endregion
+
+  const operationalContext = await loadCashierOperationalContext(cashierContext.conta);
+  const contextIssue = validateVoucherOperationalContext(authorizationRestrictions, operationalContext);
+  if (contextIssue) {
+    throw new CashierVoucherError(contextIssue, 409);
+  }
 
   const validUntil = buildPendingValidity(voucher.authorization.validUntil).toISOString();
   const result = await withTransaction<{ rows: PendingAuthorizationRow[] }>(async (txQuery) => {
@@ -467,6 +527,9 @@ export async function createCashierAuthorization(
       `
         INSERT INTO datafrota_desconto_pendente (
           discount_authorization_id,
+          company_id,
+          source_branch_id,
+          pdv_agent_id,
           codigo_desconto,
           abastecimento,
           conta,
@@ -487,12 +550,31 @@ export async function createCashierAuthorization(
           customer_code,
           customer_group_codes,
           customer_group_code,
+          first_purchase_only,
+          new_customer_days,
+          branch_ids,
           payment_form_codes,
           payment_form_code,
+          active_weekdays,
+          start_time,
+          end_time,
+          birthday_only,
+          max_discount_per_day,
+          max_volume_per_day,
+          max_quantity_per_item,
+          redemptions_per_customer,
+          max_purchases_per_week,
+          max_purchases_per_month,
+          reusable,
           mensagem_doc,
           mensagem_pdv
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, 'P', $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+          NULL, $13, 'P', $14, $15, $16, $17, $18, $19, $20,
+          $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+          $31, $32, $33, $34, $35, $36, $37, $38, $39, $40
+        )
         RETURNING
             grid,
             discount_authorization_id,
@@ -508,8 +590,22 @@ export async function createCashierAuthorization(
             customer_code,
             customer_group_codes,
             customer_group_code,
+            first_purchase_only,
+            new_customer_days,
+            branch_ids,
             payment_form_codes,
             payment_form_code,
+            active_weekdays,
+            start_time,
+            end_time,
+            birthday_only,
+            max_discount_per_day,
+            max_volume_per_day,
+            max_quantity_per_item,
+            redemptions_per_customer,
+            max_purchases_per_week,
+            max_purchases_per_month,
+            reusable,
             percentual_desconto,
             valor_desconto,
             quantidade,
@@ -527,13 +623,16 @@ export async function createCashierAuthorization(
       `,
       [
         voucher.authorization.id,
+        session?.companyId ?? null,
+        session?.branchId ?? null,
+        session?.agentId ?? null,
         normalized.shortCode,
         normalized.abastecimento,
         cashierContext.conta,
         cashierContext.estacao,
-        null,
-        null,
-        null,
+        operationalContext.saleDate ? operationalContext.saleDate.slice(0, 10) : null,
+        operationalContext.turno,
+        operationalContext.usuario,
         voucher.authorization.discountPercent,
         normalized.quantidade,
         validUntil,
@@ -545,8 +644,22 @@ export async function createCashierAuthorization(
         authorizationRestrictions.customer_codes[0] ?? null,
         authorizationRestrictions.customer_group_codes,
         authorizationRestrictions.customer_group_codes[0] ?? null,
+        authorizationRestrictions.first_purchase_only,
+        authorizationRestrictions.new_customer_days,
+        authorizationRestrictions.branch_ids,
         authorizationRestrictions.payment_form_codes,
         authorizationRestrictions.payment_form_codes[0] ?? null,
+        authorizationRestrictions.active_weekdays,
+        authorizationRestrictions.start_time,
+        authorizationRestrictions.end_time,
+        authorizationRestrictions.birthday_only,
+        authorizationRestrictions.max_discount_per_day,
+        authorizationRestrictions.max_volume_per_day,
+        authorizationRestrictions.max_quantity_per_item,
+        authorizationRestrictions.redemptions_per_customer,
+        authorizationRestrictions.max_purchases_per_week,
+        authorizationRestrictions.max_purchases_per_month,
+        authorizationRestrictions.reusable,
         normalized.mensagemDoc ?? "DESCONTO FIDELIDADE DATAFROTA",
         normalized.mensagemPdv ?? `DATAFROTA - CODIGO ${normalized.shortCode}`,
       ],
@@ -554,14 +667,6 @@ export async function createCashierAuthorization(
 
     return inserted;
   }).catch((error: { code?: string; detail?: string }) => {
-    // #region debug-point C:create-auth-insert-error
-    debugReportCashier(
-      "C",
-      "cashierDiscountService.ts:createCashierAuthorization",
-      "[DEBUG] Falha ao gravar pre-autorizacao",
-      { code: error.code, detail: error.detail ?? null },
-    );
-    // #endregion
     if (error.code === "23505") {
       throw new CashierVoucherError(
         "Nao foi possivel substituir a pre-autorizacao anterior automaticamente.",
@@ -572,19 +677,12 @@ export async function createCashierAuthorization(
     throw error;
   });
 
-  // #region debug-point C:create-auth-success
-  debugReportCashier(
-    "C",
-    "cashierDiscountService.ts:createCashierAuthorization",
-    "[DEBUG] Pre-autorizacao gravada com sucesso",
-    result.rows[0] as unknown as Record<string, unknown>,
-  );
-  // #endregion
   return mapPendingRow(result.rows[0]);
 }
 
 export async function getCashierAuthorizationStatus(
   shortCode: string,
+  session?: PdvAgentSession,
 ): Promise<CashierPendingAuthorization | null> {
   const code = shortCode.trim().toUpperCase();
   await ensureCashierSchema();
@@ -606,6 +704,8 @@ export async function getCashierAuthorizationStatus(
         customer_code,
         customer_group_codes,
         customer_group_code,
+        first_purchase_only,
+        new_customer_days,
         payment_form_codes,
         payment_form_code,
         percentual_desconto,
@@ -626,10 +726,11 @@ export async function getCashierAuthorizationStatus(
         erro
       FROM datafrota_desconto_pendente
       WHERE codigo_desconto = $1
+        AND ($2::text IS NULL OR company_id = $2::text)
       ORDER BY criado_em DESC
       LIMIT 1
     `,
-    [code],
+    [code, session?.companyId ?? null],
   );
 
   if (result.rows.length === 0) {
