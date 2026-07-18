@@ -2,6 +2,12 @@
 
 Aplicacao web com frontend em React + Vite e backend em Express/Node.js. O banco `PostgreSQL 18` roda fora dos containers, diretamente no sistema operacional.
 
+## Layout de diretorios no Windows
+
+- SaaS web com Docker: `C:\databrev`
+- App Python do caixa: `C:\Program Files\Datafrota`
+- Dados gravaveis do app do caixa (cache, credenciais, config e logs): `C:\ProgramData\Datafrota`
+
 ## Estrutura de containers
 
 - `frontend`: build do Vite servido por `nginx`
@@ -55,6 +61,8 @@ Ou use o script de reinicio completo:
 .\reiniciar-datafrota-docker.ps1
 ```
 
+O script usa `C:\databrev` como raiz do ambiente SaaS/Docker por padrao.
+
 Acessos:
 
 - Frontend: [http://localhost:8080](http://localhost:8080)
@@ -80,3 +88,5 @@ API isolada:
 ```bash
 npm run server:start
 ```
+
+O script `reiniciar-datafrota.ps1` sobe o SaaS local a partir de `C:\databrev` e inicia o app do caixa a partir de `C:\Program Files\Datafrota`.

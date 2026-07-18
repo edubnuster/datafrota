@@ -2,6 +2,12 @@
 
 Aplicativo desktop em `Tkinter` para o operador de caixa validar o voucher do app frota e registrar a pre-autorizacao para o proximo abastecimento do mesmo caixa no AutoSystem.
 
+## Instalacao no Windows
+
+- Diretorio do app: `C:\Program Files\Datafrota`
+- Dados gravaveis do terminal: `C:\ProgramData\Datafrota`
+- SaaS/API local em Docker: `C:\databrev`
+
 ## Atalhos
 
 - `F9`: abre novamente a janela do app quando ele estiver em segundo plano
@@ -12,7 +18,8 @@ Aplicativo desktop em `Tkinter` para o operador de caixa validar o voucher do ap
 ## Como executar
 
 1. Garanta que a API Node esteja ativa em `http://127.0.0.1:3001/api` ou ajuste a variavel `FROTA_API_URL`.
-2. Execute:
+2. Se necessario, ajuste `FROTA_APP_DATA_DIR` para outro diretório gravavel.
+3. Execute:
 
 ```powershell
 python .\cashier_app\integracao_frota_app.py

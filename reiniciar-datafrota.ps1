@@ -1,7 +1,14 @@
+param(
+  [string]$SaasRoot = "C:\databrev",
+  [string]$CashierAppDir = "C:\Program Files\Datafrota",
+  [string]$CashierDataDir
+)
+
 $ErrorActionPreference = "Stop"
 
-$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$logsDir = Join-Path $projectRoot ".run"
+$cashierDataRoot = if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { "C:\ProgramData" } else { $env:ProgramData }
+$cashierDataDir = if ([string]::IsNullOrWhiteSpace($CashierDataDir)) { Join-Path $cashierDataRoot "Datafrota" } else { $CashierDataDir }
+$logsDir = Join-Path $SaasRoot ".run"
 
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
 
@@ -73,15 +80,41 @@ function Stop-DataFrotaProcesses {
 }
 
 function Get-PythonLauncher {
-  if (Get-Command python -ErrorAction SilentlyContinue) {
-    return "python"
+  $pythonw = Get-Command pythonw -ErrorAction SilentlyContinue
+  if ($pythonw) {
+    return $pythonw.Source
+  }
+
+  $python = Get-Command python -ErrorAction SilentlyContinue
+  if ($python) {
+    return $python.Source
   }
 
   if (Get-Command py -ErrorAction SilentlyContinue) {
-    return "py -3"
+    return (Get-Command py -ErrorAction SilentlyContinue).Source
   }
 
   throw "Python nao encontrado no PATH."
+}
+
+function Start-BackgroundPython {
+  param(
+    [Parameter(Mandatory = $true)][string]$PythonExe,
+    [Parameter(Mandatory = $true)][string]$ScriptPath
+  )
+
+  $pythonLeaf = (Split-Path -Leaf $PythonExe).ToLowerInvariant()
+  $args = if ($pythonLeaf -eq "py.exe") {
+    @("-3", $ScriptPath)
+  } else {
+    @($ScriptPath)
+  }
+
+  return Start-Process -FilePath $PythonExe `
+    -ArgumentList $args `
+    -WorkingDirectory (Split-Path -Parent $ScriptPath) `
+    -WindowStyle Hidden `
+    -PassThru
 }
 
 function Wait-HttpReady {
@@ -114,7 +147,7 @@ function Start-DevWindow {
     [Parameter(Mandatory = $true)][string]$Command
   )
 
-  $quotedRoot = $projectRoot.Replace("'", "''")
+  $quotedRoot = $SaasRoot.Replace("'", "''")
   $quotedTitle = $Title.Replace("'", "''")
   $wrappedCommand = @"
 $Host.UI.RawUI.WindowTitle = '$quotedTitle'
@@ -124,19 +157,33 @@ $Command
 
   return Start-Process -FilePath "powershell.exe" `
     -ArgumentList @("-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $wrappedCommand) `
-    -WorkingDirectory $projectRoot `
+    -WorkingDirectory $SaasRoot `
     -PassThru
 }
 
 Write-Step "Reiniciando ambiente DATAFROTA"
-Stop-DataFrotaProcesses -RootPath $projectRoot
+if (-not (Test-Path $SaasRoot)) {
+  throw "Diretorio do SaaS web nao encontrado: $SaasRoot"
+}
+
+if (-not (Test-Path $CashierAppDir)) {
+  throw "Diretorio do app do caixa nao encontrado: $CashierAppDir"
+}
+
+if (!(Test-Path $cashierDataDir)) {
+  New-Item -ItemType Directory -Path $cashierDataDir -Force | Out-Null
+}
+
+Stop-DataFrotaProcesses -RootPath $SaasRoot
 
 $pythonLauncher = Get-PythonLauncher
-$pythonApp = Join-Path $projectRoot "cashier_app\integracao_frota_app.py"
+$pythonApp = Join-Path $CashierAppDir "integracao_frota_app.py"
 
 if (-not (Test-Path $pythonApp)) {
   throw "Arquivo do integrador nao encontrado em $pythonApp"
 }
+
+[Environment]::SetEnvironmentVariable("FROTA_APP_DATA_DIR", $cashierDataDir, "Process")
 
 Write-Step "Subindo API"
 $apiProcess = Start-DevWindow -Title "DATAFROTA API" -Command "npm.cmd run server:dev"
@@ -147,8 +194,7 @@ $clientProcess = Start-DevWindow -Title "DATAFROTA WEB" -Command "npm.cmd run cl
 Wait-HttpReady -Name "Gerador web" -Url "http://127.0.0.1:5173"
 
 Write-Step "Subindo integrador Python"
-$pythonCommand = "$pythonLauncher `"$pythonApp`""
-$pyProcess = Start-DevWindow -Title "DATAFROTA INTEGRADOR" -Command $pythonCommand
+$pyProcess = Start-BackgroundPython -PythonExe $pythonLauncher -ScriptPath $pythonApp
 
 Write-Step "Abrindo gerador no navegador"
 Start-Process "http://127.0.0.1:5173"

@@ -1,14 +1,18 @@
 param(
   [switch]$NoConsole,
-  [string]$Python
+  [string]$Python,
+  [string]$CashierAppDir = "C:\Program Files\Datafrota",
+  [string]$CashierDataDir
 )
 
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$cashierAppDir = Join-Path $projectRoot "cashier_app"
-$cacheFile = Join-Path $cashierAppDir "pdv_promotions_cache.json"
-$pyCacheDir = Join-Path $cashierAppDir "__pycache__"
+$cashierDataRoot = if ([string]::IsNullOrWhiteSpace($env:ProgramData)) { "C:\ProgramData" } else { $env:ProgramData }
+$cashierDataDir = if ([string]::IsNullOrWhiteSpace($CashierDataDir)) { Join-Path $cashierDataRoot "Datafrota" } else { $CashierDataDir }
+$cashierAppDir = $null
+$cacheFile = Join-Path $cashierDataDir "pdv_promotions_cache.json"
+$pyCacheDir = $null
 
 function Write-Step {
   param([string]$Message)
@@ -30,6 +34,11 @@ function Resolve-PythonExecutable {
     }
   }
 
+  $pythonw = Get-Command pythonw -ErrorAction SilentlyContinue
+  if ($pythonw) {
+    return $pythonw.Source
+  }
+
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($python) {
     return $python.Source
@@ -41,6 +50,48 @@ function Resolve-PythonExecutable {
   }
 
   throw "Nao foi possivel localizar python/pythonw/py no PATH. Informe -Python com o caminho do executavel."
+}
+
+function Resolve-CashierAppDirectory {
+  param(
+    [string]$RequestedPath,
+    [string]$ProjectRoot,
+    [bool]$HasExplicitOverride
+  )
+
+  $candidates = New-Object System.Collections.Generic.List[string]
+  if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
+    [void]$candidates.Add($RequestedPath)
+  }
+
+  foreach ($candidate in @(
+    (Join-Path $ProjectRoot "cashier_app"),
+    (Join-Path $ProjectRoot "app_cashier"),
+    "C:\Program Files\Datafrota",
+    "C:\Program Files (x86)\Datafrota"
+  )) {
+    if (-not [string]::IsNullOrWhiteSpace($candidate) -and -not $candidates.Contains($candidate)) {
+      [void]$candidates.Add($candidate)
+    }
+  }
+
+  foreach ($candidate in $candidates) {
+    if (-not (Test-Path $candidate)) {
+      continue
+    }
+
+    $candidateScript = Join-Path $candidate "integracao_frota_app.py"
+    if (Test-Path $candidateScript) {
+      return (Resolve-Path $candidate).Path
+    }
+  }
+
+  if ($HasExplicitOverride) {
+    throw "Pasta do app informada nao contem integracao_frota_app.py: $RequestedPath"
+  }
+
+  $searched = $candidates -join ", "
+  throw "Nao foi possivel localizar a pasta do integrador. Caminhos verificados: $searched"
 }
 
 function Stop-IntegrationProcess {
@@ -115,9 +166,9 @@ function Start-IntegrationProcess {
   }
 
   if ((Split-Path -Leaf $PythonExe).ToLower() -eq "py.exe") {
-    Start-Process -WorkingDirectory $cashierAppDir -FilePath $PythonExe -ArgumentList @("-3", ".\\integracao_frota_app.py")
+    Start-Process -WorkingDirectory $cashierAppDir -FilePath $PythonExe -ArgumentList @("-3", ".\\integracao_frota_app.py") -WindowStyle Hidden
   } else {
-    Start-Process -WorkingDirectory $cashierAppDir -FilePath $PythonExe -ArgumentList @(".\\integracao_frota_app.py")
+    Start-Process -WorkingDirectory $cashierAppDir -FilePath $PythonExe -ArgumentList @(".\\integracao_frota_app.py") -WindowStyle Hidden
   }
 
   Write-Host "Integracao iniciada." -ForegroundColor Green
@@ -126,8 +177,20 @@ function Start-IntegrationProcess {
 Write-Step "Reiniciando integracao frota (limpeza de cache + restart)"
 Set-Location $projectRoot
 
+$cashierAppDir = Resolve-CashierAppDirectory `
+  -RequestedPath $CashierAppDir `
+  -ProjectRoot $projectRoot `
+  -HasExplicitOverride $PSBoundParameters.ContainsKey("CashierAppDir")
+$pyCacheDir = Join-Path $cashierAppDir "__pycache__"
+
+if (!(Test-Path $cashierDataDir)) {
+  New-Item -ItemType Directory -Path $cashierDataDir -Force | Out-Null
+}
+
 Stop-IntegrationProcess
 Clear-IntegrationCache
 
 $pythonExe = Resolve-PythonExecutable -NoConsole:$NoConsole -Override $Python
+[Environment]::SetEnvironmentVariable("FROTA_APP_DATA_DIR", $cashierDataDir, "Process")
+Write-Host "Pasta do integrador: $cashierAppDir" -ForegroundColor DarkGray
 Start-IntegrationProcess -PythonExe $pythonExe -NoConsole:$NoConsole

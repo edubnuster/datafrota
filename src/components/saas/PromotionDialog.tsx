@@ -465,11 +465,27 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
     productSearch,
     productSearch.trim() ? [] : form.selectedProductCodes,
   );
-  const { items: productGroups, loading: productGroupsLoading } = useReferenceData("product-groups", productGroupSearch);
+  const { items: productGroups, loading: productGroupsLoading } = useReferenceData(
+    "product-groups",
+    productGroupSearch,
+    productGroupSearch.trim() ? [] : form.selectedProductGroupCodes,
+  );
   const { items: customerItems, loading: customersLoading } = useReferenceData("customers", customerSearch);
-  const { items: customerGroups, loading: customerGroupsLoading } = useReferenceData("customer-groups", customerGroupSearch);
-  const { items: branchOptions, loading: branchesLoading } = useReferenceData("branches", branchSearch);
-  const { items: paymentForms, loading: paymentsLoading } = useReferenceData("payment-forms", paymentSearch);
+  const { items: customerGroups, loading: customerGroupsLoading } = useReferenceData(
+    "customer-groups",
+    customerGroupSearch,
+    customerGroupSearch.trim() ? [] : form.selectedCustomerGroupCodes,
+  );
+  const { items: branchOptions, loading: branchesLoading } = useReferenceData(
+    "branches",
+    branchSearch,
+    branchSearch.trim() ? [] : form.selectedBranchIds,
+  );
+  const { items: paymentForms, loading: paymentsLoading } = useReferenceData(
+    "payment-forms",
+    paymentSearch,
+    paymentSearch.trim() ? [] : form.selectedPaymentFormCodes,
+  );
 
   useEffect(() => {
     if (!open) {
@@ -873,6 +889,11 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
           : `${customerCount} cliente(s)`;
   const branchScopeLabel = branchCount === 0 ? "0 filial" : `${branchCount} filial(is)`;
   const paymentScopeLabel = form.paymentMode === "all" ? "Todas as formas" : `${form.selectedPaymentFormCodes.length} forma(s)`;
+  const availablePromotionStatusOptions = isEditing
+    ? promotionStatusOptions.filter((option) => option.value !== "agendada" && option.value !== "encerrada")
+    : promotionStatusOptions;
+  const currentPromotionStatusLabel = promotionStatusOptions.find((option) => option.value === form.status)?.label ?? form.status;
+  const hasCurrentStatusOption = availablePromotionStatusOptions.some((option) => option.value === form.status);
 
   function handleStepNavigation(targetStep: WizardStep) {
     if (isEditing || targetStep <= maxNavigableStep || targetStep === step) {
@@ -1295,7 +1316,10 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
             <div className="grid gap-6">
               <div>
                 <p className="text-3xl font-semibold tracking-tight text-slate-900">Regras</p>
-                <p className="mt-1 text-sm text-slate-500">Configure o período, os limites e as condições finais da promoção.</p>
+                <p className="mt-1 text-sm text-slate-500">
+                  Configure o período, os limites e as condições finais da promoção. Quando informado, o horário é
+                  validado dentro de cada dia da vigência selecionada.
+                </p>
               </div>
 
               <div className="grid gap-5 md:grid-cols-2">
@@ -1307,11 +1331,11 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                   <ModernDateInput value={form.endDate} onChange={(value) => updateField("endDate", value)} />
                 </Field>
 
-                <Field label="Hora inicial (opcional)">
+                <Field label="Hora inicial (opcional)" description="Define a hora de início permitida em cada dia da vigência.">
                   <ModernDateInput type="time" value={form.startTime} onChange={(value) => updateField("startTime", value)} />
                 </Field>
 
-                <Field label="Hora final (opcional)">
+                <Field label="Hora final (opcional)" description="Define a hora limite permitida em cada dia da vigência.">
                   <ModernDateInput type="time" value={form.endTime} onChange={(value) => updateField("endTime", value)} />
                 </Field>
               </div>
@@ -1378,11 +1402,17 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
               <div className="rounded-[24px] border border-amber-100 bg-amber-50/50 p-5">
                 <div>
                   <p className="text-base font-semibold text-amber-900">Limites de segurança</p>
-                  <p className="mt-1 text-sm text-amber-800/70">Defina os limites máximos para controlar o uso da regra.</p>
+                  <p className="mt-1 text-sm text-amber-800/70">
+                    Defina os limites máximos da promoção. Alguns campos controlam o total geral da campanha no dia,
+                    outros controlam o uso por cliente e um deles limita a quantidade por item.
+                  </p>
                 </div>
 
                 <div className="mt-5 grid gap-5 md:grid-cols-2">
-                  <Field label="Desconto máx./dia (R$)">
+                  <Field
+                    label="Desconto máx./dia (R$)"
+                    description="Limite geral da promoção por dia, somando todos os clientes."
+                  >
                     <input
                       className="saas-input rounded-[18px] border-amber-100 bg-white"
                       placeholder="Ex: 50"
@@ -1391,7 +1421,10 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                     />
                   </Field>
 
-                  <Field label="Volume máx./dia">
+                  <Field
+                    label="Volume máx./dia"
+                    description="Limite geral da promoção por dia, somando o volume total de todos os clientes."
+                  >
                     <input
                       className="saas-input rounded-[18px] border-amber-100 bg-white"
                       placeholder="Ex: 100 L"
@@ -1400,7 +1433,10 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                     />
                   </Field>
 
-                  <Field label="Qtd. máx. por item">
+                  <Field
+                    label="Qtd. máx. por item"
+                    description="Limite por item lançado. Se um item ultrapassar essa quantidade, ele não recebe o desconto."
+                  >
                     <input
                       className="saas-input rounded-[18px] border-amber-100 bg-white"
                       placeholder="Ex: 20"
@@ -1409,7 +1445,10 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                     />
                   </Field>
 
-                  <Field label="Resgates por cliente">
+                  <Field
+                    label="Resgates por cliente"
+                    description="Quantidade máxima de usos da promoção para o mesmo cliente em todo o período."
+                  >
                     <input
                       className="saas-input rounded-[18px] border-amber-100 bg-white"
                       placeholder="Ex: 1"
@@ -1418,7 +1457,10 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                     />
                   </Field>
 
-                  <Field label="Máx. compras / semana">
+                  <Field
+                    label="Máx. compras / semana"
+                    description="Quantidade máxima de compras por cliente dentro da mesma semana."
+                  >
                     <input
                       className="saas-input rounded-[18px] border-amber-100 bg-white"
                       placeholder="Ex: 3"
@@ -1427,7 +1469,10 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                     />
                   </Field>
 
-                  <Field label="Máx. compras / mês">
+                  <Field
+                    label="Máx. compras / mês"
+                    description="Quantidade máxima de compras por cliente dentro do mesmo mês."
+                  >
                     <input
                       className="saas-input rounded-[18px] border-amber-100 bg-white"
                       placeholder="Ex: 10"
@@ -1441,8 +1486,9 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
 
               <Field label="Status">
                 <CompactComboBox
-                  value={form.status}
-                  options={[...promotionStatusOptions]}
+                  value={hasCurrentStatusOption ? form.status : ""}
+                  options={[...availablePromotionStatusOptions]}
+                  placeholder={currentPromotionStatusLabel}
                   onChange={(value) => updateField("status", value as PromotionPayload["status"])}
                 />
               </Field>

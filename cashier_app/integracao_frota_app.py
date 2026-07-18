@@ -2,11 +2,16 @@ import ctypes
 import ctypes.wintypes
 import datetime as dt
 import json
+import logging
 import os
+import queue
 import socket
 import threading
 import time
 import tkinter as tk
+import zipfile
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 from urllib import error, parse, request
 
@@ -22,6 +27,7 @@ except ImportError:
 
 
 WM_HOTKEY = 0x0312
+WM_QUIT = 0x0012
 PM_REMOVE = 0x0001
 MOD_NOREPEAT = 0x4000
 VK_F9 = 0x78
@@ -35,9 +41,157 @@ SYNCHRONIZE = 0x00100000
 WAIT_OBJECT_0 = 0x00000000
 CONTEXT_REFRESH_TTL_SECONDS = 15.0
 PROMOTION_SYNC_INTERVAL_MS = 60000
-PROMOTION_CACHE_FILE = os.path.join(os.path.dirname(__file__), "pdv_promotions_cache.json")
-AGENT_CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "pdv_agent_credentials.json")
-LOCAL_DB_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "local_db_config.json")
+APP_INSTALL_DIR = Path(__file__).resolve().parent
+DEFAULT_APP_DATA_DIR = Path(os.getenv("PROGRAMDATA") or r"C:\ProgramData") / "Datafrota"
+APP_DATA_DIR = Path(os.getenv("FROTA_APP_DATA_DIR") or DEFAULT_APP_DATA_DIR)
+PROMOTION_CACHE_FILE = APP_DATA_DIR / "pdv_promotions_cache.json"
+AGENT_CREDENTIALS_FILE = APP_DATA_DIR / "pdv_agent_credentials.json"
+LOCAL_DB_CONFIG_FILE = APP_DATA_DIR / "local_db_config.json"
+DEFAULT_LOGO_FILE_NAME = "icone_databrev_transparent.png"
+MINIMAL_WINDOW_GEOMETRY = "520x220"
+FULL_WINDOW_GEOMETRY = "760x680"
+MINIMAL_WINDOW_SIZE = (520, 220)
+FULL_WINDOW_SIZE = (760, 680)
+BRAND_LOGO_MAX_WIDTH = 52
+BRAND_LOGO_MAX_HEIGHT = 72
+LOG_DIR = APP_DATA_DIR / "log"
+LOG_BACKUP_DIR = LOG_DIR / "backup"
+LOG_FILE = LOG_DIR / "pdv-vouchers.log"
+LOG_RETENTION_DAYS = 30
+
+
+def ensure_app_data_dir() -> None:
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_brand_logo_file() -> Path | None:
+    override = os.getenv("FROTA_APP_LOGO_FILE")
+    candidates = []
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(
+        [
+            APP_INSTALL_DIR / "branding" / DEFAULT_LOGO_FILE_NAME,
+            APP_INSTALL_DIR / DEFAULT_LOGO_FILE_NAME,
+            APP_INSTALL_DIR.parent / "public" / "branding" / DEFAULT_LOGO_FILE_NAME,
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+class CompressedTimedRotatingFileHandler(TimedRotatingFileHandler):
+    def __init__(self, filename: str, backup_dir: Path, retention_days: int = LOG_RETENTION_DAYS) -> None:
+        self.backup_dir = backup_dir
+        self.retention_days = retention_days
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(filename, when="midnight", interval=1, backupCount=0, encoding="utf-8", delay=True)
+        self.suffix = "%Y-%m-%d"
+        self._compress_pending_rotated_files()
+        self._cleanup_old_backups()
+
+    def rotate(self, source: str, dest: str) -> None:
+        if not os.path.exists(source):
+            return
+        super().rotate(source, dest)
+        self._compress_rotated_file(Path(dest))
+        self._cleanup_old_backups()
+
+    def _compress_pending_rotated_files(self) -> None:
+        base_path = Path(self.baseFilename)
+        for rotated_file in base_path.parent.glob(f"{base_path.name}.*"):
+            if rotated_file.is_file() and self._extract_date_label(rotated_file.name, base_path.name):
+                self._compress_rotated_file(rotated_file)
+
+    def _compress_rotated_file(self, rotated_file: Path) -> None:
+        base_name = Path(self.baseFilename).name
+        date_label = self._extract_date_label(rotated_file.name, base_name)
+        if not date_label:
+            return
+
+        zip_path = self.backup_dir / f"{Path(self.baseFilename).stem}-{date_label}.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(rotated_file, arcname=rotated_file.name)
+        rotated_file.unlink(missing_ok=True)
+
+    def _cleanup_old_backups(self) -> None:
+        prefix = f"{Path(self.baseFilename).stem}-"
+        cutoff_date = dt.date.today() - dt.timedelta(days=self.retention_days)
+        for backup_file in self.backup_dir.glob("*.zip"):
+            if not backup_file.is_file() or not backup_file.stem.startswith(prefix):
+                continue
+            date_label = backup_file.stem[len(prefix) :]
+            try:
+                backup_date = dt.datetime.strptime(date_label, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if backup_date < cutoff_date:
+                backup_file.unlink(missing_ok=True)
+
+    @staticmethod
+    def _extract_date_label(file_name: str, base_name: str) -> str | None:
+        prefix = f"{base_name}."
+        if not file_name.startswith(prefix):
+            return None
+        date_label = file_name[len(prefix) :][:10]
+        try:
+            dt.datetime.strptime(date_label, "%Y-%m-%d")
+        except ValueError:
+            return None
+        return date_label
+
+
+def _normalize_log_value(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (dt.datetime, dt.date, dt.time)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _normalize_log_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_log_value(item) for item in value]
+    return str(value)
+
+
+def setup_cashier_logger() -> logging.Logger:
+    logger = logging.getLogger("datafrota.cashier")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    ensure_app_data_dir()
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    handler = CompressedTimedRotatingFileHandler(str(LOG_FILE), backup_dir=LOG_BACKUP_DIR)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(handler)
+    return logger
+
+
+CASHIER_LOGGER = setup_cashier_logger()
+
+
+def log_cashier_event(
+    level: int,
+    event: str,
+    message: str,
+    data: dict | None = None,
+    exc_info=None,
+) -> None:
+    payload = {
+        "event": event,
+        "message": message,
+        "data": _normalize_log_value(data or {}),
+    }
+    CASHIER_LOGGER.log(
+        level,
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        exc_info=exc_info,
+    )
 
 
 # #region debug-point shared:report
@@ -72,17 +226,20 @@ def debug_report(
         "data": data or {},
     }
 
-    try:
-        req = request.Request(
-            debug_server_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with request.urlopen(req, timeout=1.0):
+    def sender() -> None:
+        try:
+            req = request.Request(
+                debug_server_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req, timeout=0.15):
+                pass
+        except Exception:
             pass
-    except Exception:
-        pass
+
+    threading.Thread(target=sender, daemon=True).start()
 
 
 # #endregion
@@ -201,6 +358,7 @@ def save_promotion_cache(items: list[dict], server_time: str | None) -> None:
         "items": items,
     }
     try:
+        ensure_app_data_dir()
         with open(PROMOTION_CACHE_FILE, "w", encoding="utf-8") as cache_file:
             json.dump(payload, cache_file, ensure_ascii=True, indent=2)
     except OSError:
@@ -226,6 +384,7 @@ def load_agent_credentials() -> dict:
 
 def save_agent_credentials(payload: dict) -> None:
     try:
+        ensure_app_data_dir()
         with open(AGENT_CREDENTIALS_FILE, "w", encoding="utf-8") as credentials_file:
             json.dump(payload, credentials_file, ensure_ascii=True, indent=2)
     except OSError:
@@ -259,6 +418,7 @@ def load_local_db_config() -> dict:
 
 
 def save_local_db_config(payload: dict) -> None:
+    ensure_app_data_dir()
     with open(LOCAL_DB_CONFIG_FILE, "w", encoding="utf-8") as config_file:
         json.dump(payload, config_file, ensure_ascii=True, indent=2)
 
@@ -428,6 +588,7 @@ class LocalDbConfigDialog:
         self.window.bind("<Return>", lambda _event: self._on_submit())
         self.window.bind("<Escape>", lambda _event: self._on_cancel())
         self.window.wait_visibility()
+        center_window(self.window, parent)
         self.window.deiconify()
         self.window.lift()
         self.window.focus_force()
@@ -550,6 +711,31 @@ def ensure_local_db_configuration(root: tk.Tk) -> bool:
     return dialog.show() is not None
 
 
+def center_window(window: tk.Misc, parent: tk.Misc | None = None) -> None:
+    try:
+        window.update_idletasks()
+        width = window.winfo_width() or window.winfo_reqwidth()
+        height = window.winfo_height() or window.winfo_reqheight()
+
+        if parent is not None and parent.winfo_exists() and str(parent.state()) != "withdrawn":
+            parent.update_idletasks()
+            parent_x = parent.winfo_rootx()
+            parent_y = parent.winfo_rooty()
+            parent_width = parent.winfo_width()
+            parent_height = parent.winfo_height()
+            x = parent_x + max((parent_width - width) // 2, 0)
+            y = parent_y + max((parent_height - height) // 2, 0)
+        else:
+            screen_width = window.winfo_screenwidth()
+            screen_height = window.winfo_screenheight()
+            x = max((screen_width - width) // 2, 0)
+            y = max((screen_height - height) // 2, 0)
+
+        window.geometry(f"{width}x{height}+{x}+{y}")
+    except tk.TclError:
+        return
+
+
 class FrotaApiClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
@@ -654,6 +840,17 @@ class FrotaApiClient:
         req = request.Request(url=url, method=method, data=data, headers=headers)
 
         try:
+            log_cashier_event(
+                logging.INFO,
+                "api_request_started",
+                "Requisicao HTTP do PDV iniciada.",
+                {
+                    "method": method,
+                    "url": url,
+                    "payload": payload or {},
+                    "authenticated": include_auth,
+                },
+            )
             # #region debug-point A:python-http-start
             debug_report_cashier(
                 "A",
@@ -664,6 +861,17 @@ class FrotaApiClient:
             # #endregion
             with request.urlopen(req, timeout=8) as response:
                 body = json.loads(response.read().decode("utf-8"))
+                log_cashier_event(
+                    logging.INFO,
+                    "api_request_finished",
+                    "Requisicao HTTP do PDV concluida com sucesso.",
+                    {
+                        "method": method,
+                        "url": url,
+                        "status": getattr(response, "status", None),
+                        "body": body,
+                    },
+                )
                 # #region debug-point A:python-http-success
                 debug_report_cashier(
                     "A",
@@ -679,6 +887,17 @@ class FrotaApiClient:
                 body = json.loads(response_data)
             except json.JSONDecodeError:
                 body = {"error": response_data or f"Erro HTTP {exc.code}"}
+            log_cashier_event(
+                logging.WARNING,
+                "api_request_http_error",
+                "Requisicao HTTP do PDV retornou erro.",
+                {
+                    "method": method,
+                    "url": url,
+                    "status": exc.code,
+                    "body": body,
+                },
+            )
             if include_auth and exc.code == 401:
                 self.clear_agent_credentials()
                 raise RuntimeError(
@@ -694,6 +913,17 @@ class FrotaApiClient:
             # #endregion
             raise RuntimeError(body.get("error") or f"Erro HTTP {exc.code}") from exc
         except error.URLError as exc:
+            log_cashier_event(
+                logging.ERROR,
+                "api_request_connection_error",
+                "Falha de conexao do PDV com a API.",
+                {
+                    "method": method,
+                    "url": url,
+                    "reason": str(exc.reason),
+                },
+                exc_info=exc,
+            )
             # #region debug-point A:python-http-url-error
             debug_report_cashier(
                 "A",
@@ -728,6 +958,8 @@ class IntegracaoFrotaApp:
         self.hotkey_fallback_pressed = False
         self.hotkey_last_physical_state = False
         self.last_show_at = 0.0
+        self.hotkey_listener_thread = None
+        self.hotkey_listener_thread_id = 0
         self.last_context_refresh_at = 0.0
         self.context_refresh_in_flight = False
         self.status_poll_job = None
@@ -735,46 +967,58 @@ class IntegracaoFrotaApp:
         self.promotion_sync_in_flight = False
         self.synced_promotions: list[dict] = []
         self.last_promotion_sync_at: str | None = None
+        self.ui_dispatch_queue = queue.SimpleQueue()
+        self.ui_dispatch_job = None
+        self.current_operation = "idle"
+        self.last_voucher_status: str | None = None
+        self.full_mode = False
+        self.brand_logo_image: tk.PhotoImage | None = None
 
-        self.root.title("integração frota")
-        self.root.geometry("760x620")
-        self.root.minsize(760, 620)
+        self.root.title("Datafrota")
+        self.root.geometry(MINIMAL_WINDOW_GEOMETRY)
+        self.root.minsize(*MINIMAL_WINDOW_SIZE)
         self.root.resizable(False, False)
-        self.root.configure(bg="#efefef")
+        self.root.configure(bg="#ecf1f6")
         self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         self.root.withdraw()
 
         self.voucher_var = tk.StringVar()
         self.conta_var = tk.StringVar(value="Sera definida no cupom")
         self.estacao_var = tk.StringVar(value="Identificando...")
-        self.status_var = tk.StringVar(value="Informe o voucher do app frota.")
+        self.status_var = tk.StringVar(value="Informe o codigo do voucher.")
         self.summary_var = tk.StringVar(value="Aguardando validacao do voucher.")
         self.rule_var = tk.StringVar(value="")
         self.validity_var = tk.StringVar(value="")
+        self.voucher_details_var = tk.StringVar(value="Os dados do voucher serao exibidos aqui apos a validacao do codigo.")
         self.local_db_var = tk.StringVar(value=format_local_db_summary())
         self.local_db_health_var = tk.StringVar(value="Verificando conexao local...")
         self.promotion_sync_var = tk.StringVar(value="Promocoes do PDV ainda nao sincronizadas.")
+        self.validation_feedback_var = tk.StringVar(value="")
 
         self._load_cached_promotions()
 
         self._build_styles()
+        self._load_brand_logo()
         self._build_layout()
+        self.root.update_idletasks()
+        center_window(self.root)
+        self.ui_dispatch_job = self.root.after(50, self._process_ui_dispatch_queue)
         self.voucher_var.trace_add("write", self._on_voucher_change)
         self._clear_form()
-        self._refresh_local_db_health_indicator()
         self._update_interaction_state()
         self._bind_shortcuts()
         self._register_hotkey()
-        self._poll_hotkey()
+        self._start_hotkey_listener()
         self._poll_hotkey_fallback()
         self._poll_show_event()
-        self._ensure_agent_ready(silent=True)
+        self.root.after(10, self._complete_hidden_startup)
 
     def _build_styles(self) -> None:
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("Main.TFrame", background="#efefef")
+        style.configure("Main.TFrame", background="#ecf1f6")
         style.configure("Card.TFrame", background="#ffffff", relief="flat")
+        style.configure("Section.TFrame", background="#f8fafc", relief="flat")
         style.configure("Visual.TFrame", background="#d8d2ba")
         style.configure("Body.TLabel", background="#ffffff", foreground="#1f2937", font=("Segoe UI", 10))
         style.configure(
@@ -786,152 +1030,567 @@ class IntegracaoFrotaApp:
         style.configure(
             "Hint.TLabel",
             background="#ffffff",
-            foreground="#6b7280",
+            foreground="#64748b",
             font=("Segoe UI", 9),
+        )
+        style.configure(
+            "SectionTitle.TLabel",
+            background="#ffffff",
+            foreground="#0f172a",
+            font=("Segoe UI", 10, "bold"),
         )
         style.configure("Visual.TLabel", background="#d8d2ba", foreground="#1f2937", font=("Segoe UI", 11, "bold"))
         style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"))
         style.configure("Secondary.TButton", font=("Segoe UI", 10))
 
+    def _load_brand_logo(self) -> None:
+        logo_file = resolve_brand_logo_file()
+        if logo_file is None:
+            self.brand_logo_image = None
+            return
+
+        try:
+            logo_image = tk.PhotoImage(file=str(logo_file))
+        except tk.TclError:
+            self.brand_logo_image = None
+            return
+
+        width_factor = max(1, (logo_image.width() + BRAND_LOGO_MAX_WIDTH - 1) // BRAND_LOGO_MAX_WIDTH)
+        height_factor = max(1, (logo_image.height() + BRAND_LOGO_MAX_HEIGHT - 1) // BRAND_LOGO_MAX_HEIGHT)
+        sample_factor = max(width_factor, height_factor)
+        if sample_factor > 1:
+            logo_image = logo_image.subsample(sample_factor, sample_factor)
+        self.brand_logo_image = logo_image
+
     def _build_layout(self) -> None:
-        outer = ttk.Frame(self.root, style="Main.TFrame", padding=14)
+        outer = ttk.Frame(self.root, style="Main.TFrame", padding=6)
         outer.pack(fill="both", expand=True)
 
-        card = ttk.Frame(outer, style="Card.TFrame", padding=12)
+        card = ttk.Frame(outer, style="Card.TFrame", padding=8)
         card.pack(fill="both", expand=True)
 
-        content = ttk.Frame(card, style="Card.TFrame")
-        content.pack(fill="both", expand=True)
-        content.columnconfigure(0, weight=1)
+        self.hero = tk.Frame(
+            card,
+            bg="#f8fafc",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#dbe3ee",
+            padx=8,
+            pady=6,
+        )
+        self.hero.pack(fill="x")
+        self.hero.grid_columnconfigure(1, weight=1)
+        self.hero.grid_columnconfigure(2, minsize=72)
 
-        header_frame = ttk.Frame(content, style="Card.TFrame")
-        header_frame.grid(row=0, column=0, sticky="ew")
+        brand_shell = tk.Frame(
+            self.hero,
+            bg="#eef4ff",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#d7e4ff",
+            padx=3,
+            pady=3,
+        )
+        brand_shell.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 12))
 
-        ttk.Label(header_frame, text="informe o voucher do app frota", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(
+        if self.brand_logo_image:
+            tk.Label(brand_shell, image=self.brand_logo_image, bg="#eef4ff", bd=0).pack()
+        else:
+            tk.Label(
+                brand_shell,
+                text="DB",
+                bg="#eef4ff",
+                fg="#1d4ed8",
+                font=("Segoe UI", 14, "bold"),
+            ).pack(expand=True)
+
+        header_frame = tk.Frame(self.hero, bg="#f8fafc")
+        header_frame.grid(row=0, column=1, sticky="new", padx=(0, 10))
+
+        tk.Label(
             header_frame,
-            text=f"Digite o voucher e confirme com F5. O atalho global sugerido para abrir o app e {HOTKEY_LABEL}.",
-            style="Hint.TLabel",
-            wraplength=560,
-        ).pack(anchor="w", pady=(4, 10))
+            text="Validacao de voucher",
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Segoe UI", 15, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            header_frame,
+            text="Digite o codigo do voucher e clique em ok para confirmar",
+            bg="#f8fafc",
+            fg="#64748b",
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=250,
+        ).pack(anchor="w", pady=(2, 0))
 
-        self.voucher_entry = ttk.Entry(header_frame, textvariable=self.voucher_var, font=("Segoe UI", 15), width=22)
-        self.voucher_entry.pack(fill="x", ipady=4)
+        tk.Label(
+            self.hero,
+            text="F9 atalho",
+            bg="#dbeafe",
+            fg="#1d4ed8",
+            font=("Segoe UI", 8, "bold"),
+            padx=8,
+            pady=3,
+        ).grid(row=0, column=2, sticky="ne")
 
-        details = ttk.Frame(content, style="Card.TFrame")
-        details.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
-        details.columnconfigure(1, weight=1)
-        details.columnconfigure(3, weight=1)
+        input_frame = tk.Frame(self.hero, bg="#f8fafc")
+        input_frame.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(6, 0))
 
-        ttk.Label(details, text="Resumo", style="Body.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(details, textvariable=self.summary_var, style="Body.TLabel", wraplength=330).grid(
-            row=0, column=1, columnspan=3, sticky="w", padx=(8, 0)
+        tk.Label(
+            input_frame,
+            text="CODIGO DO VOUCHER",
+            bg="#f8fafc",
+            fg="#64748b",
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+
+        entry_row = tk.Frame(input_frame, bg="#f8fafc")
+        entry_row.pack(fill="x", pady=(3, 0))
+
+        self.voucher_entry = ttk.Entry(entry_row, textvariable=self.voucher_var, font=("Segoe UI", 14), width=12)
+        self.voucher_entry.pack(side="left", ipady=5)
+
+        self.validation_feedback_label = tk.Label(
+            input_frame,
+            textvariable=self.validation_feedback_var,
+            bg="#f8fafc",
+            fg="#6b7280",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            justify="left",
         )
+        self.validation_feedback_label.pack(fill="x", pady=(4, 0))
 
-        ttk.Label(details, text="Regra", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(details, textvariable=self.rule_var, style="Body.TLabel", wraplength=330).grid(
-            row=1, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(8, 0)
+        self.compact_actions = ttk.Frame(entry_row, style="Card.TFrame")
+        self.compact_actions.pack(side="right")
+
+        self.compact_cancel_button = ttk.Button(
+            self.compact_actions,
+            text="Cancelar",
+            style="Secondary.TButton",
+            command=self.on_cancel,
         )
+        self.compact_cancel_button.pack(side="right")
 
-        ttk.Label(details, text="Validade", style="Body.TLabel").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(details, textvariable=self.validity_var, style="Body.TLabel").grid(
-            row=2, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(8, 0)
+        self.compact_confirm_button = ttk.Button(
+            self.compact_actions,
+            text="OK",
+            style="Primary.TButton",
+            command=self.on_confirm,
         )
+        self.compact_confirm_button.pack(side="right", padx=(0, 8))
 
-        ttk.Label(details, text="Conta", style="Body.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(details, textvariable=self.conta_var, style="Body.TLabel").grid(
-            row=3, column=1, sticky="w", padx=(8, 14), pady=(10, 0)
+        self.status_strip = tk.Frame(card, bg="#ffffff")
+        self.status_strip.pack(fill="x", pady=(4, 6), after=self.hero)
+        self.status_strip.grid_columnconfigure(0, weight=1)
+        self.status_strip.grid_columnconfigure(2, weight=1)
+
+        self.status_left_line = tk.Frame(self.status_strip, bg="#dbe3ee", height=1)
+        self.status_left_line.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(1, 0))
+
+        self.status_label = tk.Label(
+            self.status_strip,
+            textvariable=self.status_var,
+            bg="#ffffff",
+            fg="#475569",
+            font=("Segoe UI", 9),
+            anchor="center",
+            justify="left",
         )
+        self.status_label.grid(row=0, column=1, padx=4, pady=(0, 2))
 
-        ttk.Label(details, text="Estacao", style="Body.TLabel").grid(row=3, column=2, sticky="w", pady=(10, 0))
-        ttk.Label(details, textvariable=self.estacao_var, style="Body.TLabel").grid(
-            row=3, column=3, sticky="w", padx=(8, 0), pady=(10, 0)
+        self.status_right_line = tk.Frame(self.status_strip, bg="#dbe3ee", height=1)
+        self.status_right_line.grid(row=0, column=2, sticky="ew", padx=(6, 0), pady=(1, 0))
+
+        self.compact_overview = tk.Frame(
+            card,
+            bg="#ffffff",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#e5e7eb",
+            padx=12,
+            pady=8,
         )
+        self.compact_overview.pack(fill="x", pady=(8, 0), after=self.hero)
+        compact_header = tk.Frame(self.compact_overview, bg="#ffffff")
+        compact_header.pack(fill="x")
 
-        ttk.Label(details, text="Sync PDV", style="Body.TLabel").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(details, textvariable=self.promotion_sync_var, style="Hint.TLabel", wraplength=330).grid(
-            row=4, column=1, columnspan=3, sticky="w", padx=(8, 0), pady=(10, 0)
-        )
+        conta_meta = tk.Frame(compact_header, bg="#ffffff")
+        conta_meta.pack(side="left", fill="x", expand=True)
+        tk.Label(conta_meta, text="CONTA", bg="#ffffff", fg="#64748b", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(
+            conta_meta,
+            textvariable=self.conta_var,
+            bg="#ffffff",
+            fg="#0f172a",
+            font=("Segoe UI", 9, "bold"),
+            justify="left",
+            wraplength=135,
+        ).pack(anchor="w", pady=(2, 0))
 
-        ttk.Label(details, text="Banco local", style="Body.TLabel").grid(row=5, column=0, sticky="w", pady=(10, 0))
-        local_db_frame = ttk.Frame(details, style="Card.TFrame")
-        local_db_frame.grid(row=5, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(10, 0))
-        local_db_frame.columnconfigure(0, weight=1)
+        estacao_meta = tk.Frame(compact_header, bg="#ffffff")
+        estacao_meta.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        tk.Label(estacao_meta, text="ESTACAO", bg="#ffffff", fg="#64748b", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(
+            estacao_meta,
+            textvariable=self.estacao_var,
+            bg="#ffffff",
+            fg="#0f172a",
+            font=("Segoe UI", 9, "bold"),
+            justify="left",
+            wraplength=120,
+        ).pack(anchor="w", pady=(2, 0))
 
-        ttk.Label(local_db_frame, textvariable=self.local_db_var, style="Hint.TLabel", wraplength=330).grid(
-            row=0, column=0, sticky="w"
-        )
+        banco_meta = tk.Frame(compact_header, bg="#ffffff")
+        banco_meta.pack(side="right", anchor="ne")
+        tk.Label(banco_meta, text="BANCO", bg="#ffffff", fg="#64748b", font=("Segoe UI", 8, "bold")).pack(anchor="e")
         self.local_db_health_label = tk.Label(
-            local_db_frame,
+            banco_meta,
             textvariable=self.local_db_health_var,
             bg="#ffffff",
-            fg="#b45309",
+            fg="#475569",
             font=("Segoe UI", 9, "bold"),
+            justify="right",
+            wraplength=135,
+            anchor="e",
         )
-        self.local_db_health_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.local_db_health_label.pack(anchor="e", pady=(2, 0))
 
-        ttk.Label(details, text="Condições", style="Body.TLabel").grid(row=6, column=0, sticky="nw", pady=(12, 0))
+        tk.Frame(self.compact_overview, bg="#e5e7eb", height=1).pack(fill="x", pady=(8, 7))
+        tk.Label(
+            self.compact_overview,
+            textvariable=self.summary_var,
+            bg="#ffffff",
+            fg="#1f2937",
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=440,
+            anchor="w",
+        ).pack(fill="x")
+
+        self.details = tk.Frame(
+            card,
+            bg="#f8fafc",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#dbe3ee",
+            padx=12,
+            pady=9,
+        )
+        tk.Label(
+            self.details,
+            text="Detalhes da validacao",
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+
+        details_meta = tk.Frame(self.details, bg="#f8fafc")
+        details_meta.pack(fill="x", pady=(6, 0))
+        for column in range(2):
+            details_meta.grid_columnconfigure(column, weight=1)
+
+        rule_card = tk.Frame(
+            details_meta,
+            bg="#ffffff",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#e5e7eb",
+            padx=10,
+            pady=8,
+        )
+        rule_card.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+        tk.Label(rule_card, text="REGRA", bg="#ffffff", fg="#64748b", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(
+            rule_card,
+            textvariable=self.rule_var,
+            bg="#ffffff",
+            fg="#0f172a",
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=300,
+        ).pack(anchor="w", pady=(4, 0))
+
+        validity_card = tk.Frame(
+            details_meta,
+            bg="#ffffff",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#e5e7eb",
+            padx=10,
+            pady=8,
+        )
+        validity_card.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        tk.Label(validity_card, text="VALIDADE", bg="#ffffff", fg="#64748b", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(
+            validity_card,
+            textvariable=self.validity_var,
+            bg="#ffffff",
+            fg="#0f172a",
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=300,
+        ).pack(anchor="w", pady=(4, 0))
+
+        promotion_card = tk.Frame(
+            details_meta,
+            bg="#ffffff",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#e5e7eb",
+            padx=10,
+            pady=8,
+        )
+        promotion_card.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 4))
+        tk.Label(promotion_card, text="DADOS DO VOUCHER", bg="#ffffff", fg="#64748b", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        tk.Label(
+            promotion_card,
+            textvariable=self.voucher_details_var,
+            bg="#ffffff",
+            fg="#0f172a",
+            font=("Segoe UI", 9),
+            justify="left",
+            wraplength=300,
+        ).pack(anchor="w", pady=(4, 0))
+
+        tk.Label(
+            self.details,
+            text="Condicoes aprovadas",
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(anchor="w", pady=(10, 0))
         self.conditions_text = tk.Text(
-            details,
-            height=12,
+            self.details,
+            height=5,
             width=68,
             wrap="word",
-            bg="#f8fafc",
+            bg="#ffffff",
             fg="#1f2937",
             relief="flat",
             borderwidth=1,
+            highlightthickness=1,
+            highlightbackground="#e5e7eb",
             padx=10,
             pady=8,
             font=("Segoe UI", 9),
         )
-        self.conditions_text.grid(row=6, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(12, 0))
+        self.conditions_text.pack(fill="both", expand=True, pady=(5, 0))
         self.conditions_text.configure(state="disabled")
 
-        self.status_label = ttk.Label(
-            details,
-            textvariable=self.status_var,
-            style="Hint.TLabel",
-            wraplength=560,
-        )
-        self.status_label.grid(row=7, column=0, columnspan=4, sticky="w", pady=(12, 0))
-
         self.footer = ttk.Frame(card, style="Card.TFrame")
-        self.footer.pack(fill="x", pady=(8, 0))
+        self.footer.pack(side="bottom", fill="x", pady=(10, 4))
 
-        self.db_config_button = ttk.Button(
-            self.footer,
-            text="Configurar banco local",
-            style="Secondary.TButton",
-            command=self._open_local_db_configuration,
-        )
-        self.db_config_button.pack(side="left", padx=(0, 10))
+        footer_info = ttk.Frame(self.footer, style="Card.TFrame")
+        footer_info.pack(side="left", fill="x", expand=True)
 
         self.footer_hint = ttk.Label(
-            self.footer,
-            text="Use F5 para validar/autorizar. ESC fecha a tela.",
+            footer_info,
+            text="F1 detalhes  |  F5 confirma  |  Esc cancela",
             style="Hint.TLabel",
         )
         self.footer_hint.pack(side="left")
 
+        self.footer_actions = ttk.Frame(self.footer, style="Card.TFrame")
+        self.footer_actions.pack(side="right")
+
+        self.db_config_button = ttk.Button(
+            self.footer_actions,
+            text="Configurar banco local",
+            style="Secondary.TButton",
+            command=self._open_local_db_configuration,
+        )
+
+        self.cancel_button = ttk.Button(
+            self.footer_actions,
+            text="Cancelar",
+            style="Secondary.TButton",
+            command=self.on_cancel,
+        )
+        self.cancel_button.pack(side="right")
+
         self.confirm_button = ttk.Button(
-            self.footer,
-            text="Validar voucher - F5",
+            self.footer_actions,
+            text="OK",
             style="Primary.TButton",
             command=self.on_confirm,
         )
-        self.confirm_button.pack(side="right")
+        self.confirm_button.pack(side="right", padx=(0, 8))
         self.confirm_button_visible = True
+        self._set_full_mode(False, force=True)
 
     def _bind_shortcuts(self) -> None:
         self.root.bind("<F5>", self._on_confirm_event)
         self.root.bind("<Escape>", self._on_cancel_event)
-        self.voucher_entry.bind("<Return>", self._on_confirm_event)
+        self.root.bind("<F1>", self._on_toggle_details_event)
+        self.voucher_entry.bind("<Return>", self._on_voucher_submit_event)
+        self.voucher_entry.bind("<FocusOut>", self._on_voucher_focus_out)
 
     def _on_voucher_change(self, *_args) -> None:
+        current_value = self.voucher_var.get()
+        upper_value = current_value.upper()
+        if current_value != upper_value:
+            self.voucher_var.set(upper_value)
+            return
+
+        current_code = upper_value.strip()
+        validated_code = ""
+        if self.validated_voucher:
+            validated_code = str(self.validated_voucher.get("shortCode") or "").strip().upper()
+
+        if not current_code:
+            self._reset_validation_result()
+            self._set_validation_feedback("", "neutral")
+            self.status_var.set("Informe o codigo do voucher.")
+        elif validated_code and validated_code != current_code:
+            self._reset_validation_result()
+            self._set_validation_feedback("", "neutral")
+            self.status_var.set("Codigo alterado. Revise e confirme.")
+        elif not validated_code:
+            self._set_validation_feedback("", "neutral")
         self._refresh_footer_actions()
+
+    def _on_voucher_focus_out(self, _event=None) -> None:
+        self.root.after(50, self._auto_validate_current_code)
+
+    def _on_voucher_submit_event(self, _event=None):
+        self._request_voucher_validation()
+        return "break"
+
+    def _on_toggle_details_event(self, _event=None):
+        self._set_full_mode(not self.full_mode)
+        return "break"
+
+    def _set_full_mode(self, enabled: bool, force: bool = False) -> None:
+        if self.full_mode == enabled and not force:
+            return
+
+        self.full_mode = enabled
+        if enabled:
+            if not self.status_strip.winfo_manager():
+                self.status_strip.pack(fill="x", pady=(4, 6), after=self.hero)
+            if not self.details.winfo_manager():
+                self.details.pack(fill="both", expand=True, pady=(8, 0))
+            if self.compact_actions.winfo_manager():
+                self.compact_actions.pack_forget()
+            if not self.footer.winfo_manager():
+                self.footer.pack(side="bottom", fill="x", pady=(10, 4))
+            if not self.db_config_button.winfo_manager():
+                self.db_config_button.pack(side="left", padx=(0, 12))
+            self.footer_hint.configure(text="F1 oculta detalhes  |  F5 confirma  |  Esc cancela")
+            self.root.geometry(FULL_WINDOW_GEOMETRY)
+            self.root.minsize(*FULL_WINDOW_SIZE)
+        else:
+            if self.status_strip.winfo_manager():
+                self.status_strip.pack_forget()
+            if self.compact_overview.winfo_manager():
+                self.compact_overview.pack_forget()
+            if self.details.winfo_manager():
+                self.details.pack_forget()
+            if self.db_config_button.winfo_manager():
+                self.db_config_button.pack_forget()
+            if self.footer.winfo_manager():
+                self.footer.pack_forget()
+            if not self.compact_actions.winfo_manager():
+                self.compact_actions.pack(side="right")
+            self.footer_hint.configure(text="F1 detalhes  |  F5 confirma  |  Esc cancela")
+            self.root.geometry(MINIMAL_WINDOW_GEOMETRY)
+            self.root.minsize(*MINIMAL_WINDOW_SIZE)
+
+        self.root.update_idletasks()
+        center_window(self.root)
+
+    def _set_validation_feedback(self, message: str, tone: str = "neutral") -> None:
+        color_map = {
+            "neutral": "#6b7280",
+            "success": "#15803d",
+            "error": "#b91c1c",
+            "pending": "#475569",
+        }
+        self.validation_feedback_var.set(message)
+        self.validation_feedback_label.configure(fg=color_map.get(tone, "#6b7280"))
+
+    def _reset_validation_result(self) -> None:
+        self.validated_voucher = None
+        self.authorization_created = False
+        self.last_voucher_status = None
+        self.summary_var.set("Aguardando validacao do voucher.")
+        self.rule_var.set("")
+        self.validity_var.set("")
+        self.voucher_details_var.set("Os dados do voucher serao exibidos aqui apos a validacao do codigo.")
+        self._set_conditions_text("As condicoes aprovadas serao exibidas aqui apos a validacao do codigo.")
+
+    def _auto_validate_current_code(self) -> None:
+        if self.is_busy or not self.root.winfo_viewable():
+            return
+
+        current_code = self.voucher_var.get().strip().upper()
+        if not current_code:
+            return
+
+        if self.validated_voucher and self.validated_voucher.get("shortCode") == current_code:
+            return
+
+        if not self.agent_ready or not self.integration_ready:
+            return
+
+        self._request_voucher_validation()
+
+    def _has_validated_current_code(self) -> bool:
+        current_code = self.voucher_var.get().strip().upper()
+        if not current_code or not self.validated_voucher:
+            return False
+        return str(self.validated_voucher.get("shortCode") or "").strip().upper() == current_code
+
+    def _request_voucher_validation(self) -> None:
+        current_code = self.voucher_var.get().strip().upper()
+        if not current_code:
+            self.status_var.set("Informe o codigo do voucher.")
+            self.voucher_entry.focus_set()
+            return
+
+        if not self.agent_ready:
+            self.status_var.set("Ative este PDV com o codigo gerado para a filial antes de usar o voucher.")
+            self._ensure_agent_ready(silent=False)
+            return
+
+        if not self.integration_ready:
+            self.status_var.set("Validando estrutura da integracao no banco...")
+            self._ensure_integration_ready(silent=False)
+            return
+
+        if self._has_validated_current_code():
+            self._refresh_footer_actions()
+            return
+
+        self._validate_voucher()
 
     def _refresh_local_db_summary(self) -> None:
         self.local_db_var.set(format_local_db_summary())
+
+    def _complete_hidden_startup(self) -> None:
+        self._refresh_local_db_health_indicator()
+        self._ensure_agent_ready(silent=True)
+
+    def _dispatch_on_ui_thread(self, callback) -> None:
+        self.ui_dispatch_queue.put(callback)
+
+    def _process_ui_dispatch_queue(self) -> None:
+        while True:
+            try:
+                callback = self.ui_dispatch_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            callback()
+
+        self.ui_dispatch_job = self.root.after(50, self._process_ui_dispatch_queue)
 
     def _apply_local_db_health_state(self, state: str, text: str) -> None:
         color_map = {
@@ -941,7 +1600,8 @@ class IntegracaoFrotaApp:
             "checking": "#475569",
         }
         self.local_db_health_var.set(text)
-        self.local_db_health_label.configure(fg=color_map.get(state, "#475569"))
+        if hasattr(self, "local_db_health_label"):
+            self.local_db_health_label.configure(fg=color_map.get(state, "#475569"))
 
     def _refresh_local_db_health_indicator(self) -> None:
         config = load_local_db_config()
@@ -954,7 +1614,7 @@ class IntegracaoFrotaApp:
 
         def runner() -> None:
             state, text = get_local_db_health_state(config)
-            self.root.after(0, lambda: self._apply_local_db_health_state(state, text))
+            self._dispatch_on_ui_thread(lambda: self._apply_local_db_health_state(state, text))
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -988,6 +1648,25 @@ class IntegracaoFrotaApp:
         if not self.hotkey_registered:
             self.status_var.set("Nao foi possivel registrar o atalho global F9. O app segue disponivel manualmente.")
 
+    def _start_hotkey_listener(self) -> None:
+        if not self.hotkey_registered or self.hotkey_listener_thread:
+            return
+
+        def runner() -> None:
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            self.hotkey_listener_thread_id = int(kernel32.GetCurrentThreadId())
+            msg = ctypes.wintypes.MSG()
+            while True:
+                result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if result <= 0:
+                    break
+                if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
+                    self._dispatch_on_ui_thread(self.show_window)
+
+        self.hotkey_listener_thread = threading.Thread(target=runner, daemon=True)
+        self.hotkey_listener_thread.start()
+
     def _poll_hotkey(self) -> None:
         msg = ctypes.wintypes.MSG()
         user32 = ctypes.windll.user32
@@ -1003,7 +1682,7 @@ class IntegracaoFrotaApp:
                 )
                 self.show_window()
 
-        self.root.after(120, self._poll_hotkey)
+        self.root.after(25, self._poll_hotkey)
 
     def _poll_hotkey_fallback(self) -> None:
         user32 = ctypes.windll.user32
@@ -1037,7 +1716,7 @@ class IntegracaoFrotaApp:
             self.show_window()
 
         self.hotkey_fallback_pressed = is_pressed
-        self.root.after(90, self._poll_hotkey_fallback)
+        self.root.after(25, self._poll_hotkey_fallback)
 
     def _poll_show_event(self) -> None:
         if self.show_event_handle:
@@ -1051,7 +1730,7 @@ class IntegracaoFrotaApp:
                     run_id="post-fix",
                 )
                 self.show_window()
-        self.root.after(120, self._poll_show_event)
+        self.root.after(25, self._poll_show_event)
 
     def _set_busy(self, busy: bool) -> None:
         self.is_busy = busy
@@ -1060,27 +1739,34 @@ class IntegracaoFrotaApp:
     def _update_interaction_state(self) -> None:
         interactive_state = "normal" if (self.agent_ready and self.integration_ready and not self.is_busy) else "disabled"
         self.confirm_button.configure(state=interactive_state)
+        self.compact_confirm_button.configure(state=interactive_state)
+        self.compact_cancel_button.configure(state="normal")
         self.voucher_entry.configure(state=interactive_state)
         self._refresh_footer_actions()
 
     def _refresh_footer_actions(self) -> None:
-        if self.validated_voucher:
-            self.confirm_button.configure(text="Autorizar no caixa - F5")
-        else:
-            self.confirm_button.configure(text="Validar voucher - F5")
+        self.confirm_button.configure(text="OK")
+        self.compact_confirm_button.configure(text="OK")
+        self.confirm_button_visible = True
+        can_apply = (
+            self.agent_ready
+            and self.integration_ready
+            and not self.is_busy
+            and self._has_validated_current_code()
+            and not self.authorization_created
+        )
+        confirm_state = "normal" if can_apply else "disabled"
+        cancel_state = "disabled" if self.is_busy else "normal"
+        self.confirm_button.configure(state=confirm_state)
+        self.compact_confirm_button.configure(state=confirm_state)
+        self.cancel_button.configure(state=cancel_state)
+        self.compact_cancel_button.configure(state=cancel_state)
 
-        should_show_confirm = bool(self.validated_voucher) or bool(self.voucher_var.get().strip())
-        if should_show_confirm and not self.confirm_button_visible:
-            self.confirm_button.pack(side="right")
-            self.confirm_button_visible = True
-        elif not should_show_confirm and self.confirm_button_visible:
-            self.confirm_button.pack_forget()
-            self.confirm_button_visible = False
-
-    def _run_async(self, worker, on_success) -> None:
+    def _run_async(self, worker, on_success, operation: str, on_error=None) -> None:
         if self.is_busy:
             return
 
+        self.current_operation = operation
         self._set_busy(True)
 
         def runner() -> None:
@@ -1088,25 +1774,52 @@ class IntegracaoFrotaApp:
                 result = worker()
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
-                self.root.after(0, lambda message=message: self._handle_error(message))
+                log_cashier_event(
+                    logging.ERROR,
+                    "async_worker_failed",
+                    "Fluxo assíncrono do voucher falhou.",
+                    {
+                        "operation": operation,
+                        "error": message,
+                        "voucher": self._build_log_context(),
+                    },
+                    exc_info=exc,
+                )
+                self._dispatch_on_ui_thread(
+                    lambda message=message, operation=operation, on_error=on_error: (
+                        on_error(message) if callable(on_error) else self._handle_error(message, operation)
+                    )
+                )
                 return
 
-            self.root.after(0, lambda: self._finish_async(on_success, result))
+            self._dispatch_on_ui_thread(lambda: self._finish_async(on_success, result, operation))
 
         threading.Thread(target=runner, daemon=True).start()
 
-    def _finish_async(self, callback, result) -> None:
+    def _finish_async(self, callback, result, operation: str) -> None:
         self._set_busy(False)
+        self.current_operation = "idle"
         callback(result)
 
-    def _handle_error(self, message: str) -> None:
+    def _handle_error(self, message: str, operation: str | None = None) -> None:
         self._set_busy(False)
+        self.current_operation = "idle"
         if not self.api.has_agent_credentials():
             self.agent_ready = False
             self.integration_ready = False
             self._update_interaction_state()
             self._refresh_promotion_sync_summary("Credencial do PDV ausente ou revogada. Ative este terminal novamente.")
         self.status_var.set(message)
+        log_cashier_event(
+            logging.ERROR,
+            "voucher_flow_error",
+            "A tela do PDV exibiu erro no fluxo de voucher.",
+            {
+                "operation": operation or "desconhecida",
+                "message": message,
+                "voucher": self._build_log_context(),
+            },
+        )
         # #region debug-point E:python-ui-error
         debug_report_cashier(
             "E",
@@ -1124,27 +1837,32 @@ class IntegracaoFrotaApp:
         self.on_cancel()
 
     def on_confirm(self) -> None:
-        if not self.agent_ready:
-            self.status_var.set("Ative este PDV com o codigo gerado para a filial antes de usar o voucher.")
-            self._ensure_agent_ready(silent=False)
-            return
-
-        if not self.integration_ready:
-            self.status_var.set("Validando estrutura da integracao no banco...")
-            self._ensure_integration_ready(silent=False)
-            return
-
         current_code = self.voucher_var.get().strip().upper()
         if not current_code:
-            self.status_var.set("Informe o voucher do app frota.")
+            self.status_var.set("Informe o codigo do voucher.")
+            log_cashier_event(
+                logging.WARNING,
+                "confirm_blocked_missing_code",
+                "Tentativa de validar voucher sem informar codigo.",
+                {"voucher": self._build_log_context()},
+            )
             self.voucher_entry.focus_set()
             return
 
-        if self.validated_voucher and self.validated_voucher["shortCode"] == current_code:
-            self._authorize_voucher()
+        if not self._has_validated_current_code():
+            self.status_var.set("Valide o codigo para visualizar as condicoes antes de aplicar o voucher.")
+            self._request_voucher_validation()
             return
 
-        self._validate_voucher()
+        if self.validated_voucher and self.validated_voucher["shortCode"] == current_code:
+            log_cashier_event(
+                logging.INFO,
+                "confirm_authorize_requested",
+                "Operador confirmou a pre-autorizacao do voucher.",
+                {"voucher": self._build_log_context()},
+            )
+            self._authorize_voucher()
+            return
 
     def on_cancel(self) -> None:
         self.hide_window()
@@ -1170,22 +1888,19 @@ class IntegracaoFrotaApp:
             run_id="post-fix",
         )
         # #endregion
+        self._set_full_mode(False)
         self.root.state("normal")
         self.root.deiconify()
-        self.root.geometry("760x620")
-        self.root.update_idletasks()
-        self.root.update()
+        center_window(self.root)
         self.root.lift()
         self.root.attributes("-topmost", True)
-        self.root.focus_force()
+        self.root.after_idle(self.root.focus_force)
         if self.validated_voucher:
-            self.confirm_button.focus_force()
+            self.root.after_idle(self.confirm_button.focus_force)
         else:
-            self.voucher_entry.focus_force()
-        self.root.after(250, lambda: self.root.attributes("-topmost", False))
-        self.root.after(50, self.root.update_idletasks)
-        self.root.after(120, self.root.update)
-        self.root.after(120, lambda: self._ensure_agent_ready(silent=not self.root.winfo_viewable()))
+            self.root.after_idle(self.voucher_entry.focus_force)
+        self.root.after(120, lambda: self.root.attributes("-topmost", False))
+        self.root.after(180, lambda: self._ensure_agent_ready(silent=not self.root.winfo_viewable()))
 
     def hide_window(self) -> None:
         debug_report(
@@ -1209,10 +1924,15 @@ class IntegracaoFrotaApp:
         self.summary_var.set("Aguardando validacao do voucher.")
         self.rule_var.set("")
         self.validity_var.set("")
-        self._set_conditions_text("As condicoes validadas da promocao serao exibidas aqui apos o primeiro F5.")
-        self.status_var.set("Informe o voucher do app frota.")
+        self.voucher_details_var.set("Os dados do voucher serao exibidos aqui apos a validacao do codigo.")
+        self._set_conditions_text("As condicoes aprovadas serao exibidas aqui apos a validacao do codigo.")
+        self._set_validation_feedback("", "neutral")
+        self.status_var.set("Informe o codigo do voucher.")
         self.validated_voucher = None
         self.authorization_created = False
+        self.current_operation = "idle"
+        self.last_voucher_status = None
+        self._set_full_mode(False)
         self._refresh_footer_actions()
 
     def _load_cached_promotions(self) -> None:
@@ -1284,10 +2004,10 @@ class IntegracaoFrotaApp:
                     raise RuntimeError(response.get("error") or "Nao foi possivel sincronizar as promocoes do PDV.")
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
-                self.root.after(0, lambda message=message: self._apply_promotion_sync_error(message))
+                self._dispatch_on_ui_thread(lambda message=message: self._apply_promotion_sync_error(message))
                 return
 
-            self.root.after(0, lambda: self._apply_promotion_sync(response))
+            self._dispatch_on_ui_thread(lambda: self._apply_promotion_sync(response))
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -1348,10 +2068,10 @@ class IntegracaoFrotaApp:
                     )
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
-                self.root.after(0, lambda message=message, silent=silent: self._apply_bootstrap_error(message, silent))
+                self._dispatch_on_ui_thread(lambda message=message, silent=silent: self._apply_bootstrap_error(message, silent))
                 return
 
-            self.root.after(0, lambda: self._apply_bootstrap_success())
+            self._dispatch_on_ui_thread(lambda: self._apply_bootstrap_success())
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -1360,7 +2080,7 @@ class IntegracaoFrotaApp:
         self.integration_ready = True
         self._update_interaction_state()
         if not self.validated_voucher and not self.authorization_created:
-            self.status_var.set("Estrutura validada. Informe o voucher do app frota.")
+            self.status_var.set("Estrutura validada. Informe o codigo do voucher.")
         self._refresh_context(silent=True)
         self._schedule_promotion_sync(1200)
         if not self.validated_voucher:
@@ -1418,10 +2138,12 @@ class IntegracaoFrotaApp:
                 item = self.api.activate_agent(pairing_code)
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
-                self.root.after(0, lambda message=message, silent=silent: self._apply_agent_activation_error(message, silent))
+                self._dispatch_on_ui_thread(
+                    lambda message=message, silent=silent: self._apply_agent_activation_error(message, silent)
+                )
                 return
 
-            self.root.after(0, lambda item=item: self._apply_agent_activation_success(item))
+            self._dispatch_on_ui_thread(lambda item=item: self._apply_agent_activation_success(item))
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -1470,10 +2192,10 @@ class IntegracaoFrotaApp:
                     raise RuntimeError(response.get("error") or "Nao foi possivel identificar o caixa aberto.")
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
-                self.root.after(0, lambda message=message, silent=silent: self._apply_context_error(message, silent))
+                self._dispatch_on_ui_thread(lambda message=message, silent=silent: self._apply_context_error(message, silent))
                 return
 
-            self.root.after(0, lambda: self._apply_context(response.get("item", {})))
+            self._dispatch_on_ui_thread(lambda: self._apply_context(response.get("item", {})))
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -1490,6 +2212,12 @@ class IntegracaoFrotaApp:
         }
         self.conta_var.set(str(item.get("conta") or "Sera definida no cupom"))
         self.estacao_var.set(str(item.get("estacao") or "Nao identificado"))
+        log_cashier_event(
+            logging.INFO,
+            "cashier_context_updated",
+            "Contexto atual do caixa foi atualizado.",
+            {"cashierContext": dict(self.cashier_context)},
+        )
 
     def _apply_context_error(self, message: str, silent: bool) -> None:
         self.context_refresh_in_flight = False
@@ -1503,12 +2231,28 @@ class IntegracaoFrotaApp:
         }
         self.conta_var.set("Sera definida no cupom")
         self.estacao_var.set("Nao identificado")
+        log_cashier_event(
+            logging.WARNING,
+            "cashier_context_error",
+            "Falha ao atualizar o contexto atual do caixa.",
+            {"message": message, "silent": silent},
+        )
         if not silent and not self.validated_voucher:
             self.status_var.set(message)
 
-    def _validate_voucher(self) -> None:
+    def _validate_voucher(self, after_success=None) -> None:
         short_code = self.voucher_var.get().strip().upper()
-        self.status_var.set("Validando voucher no sistema...")
+        self.status_var.set("Validando codigo no sistema...")
+        self._set_validation_feedback("Validando codigo...", "pending")
+        log_cashier_event(
+            logging.INFO,
+            "voucher_validation_started",
+            "Validacao de voucher iniciada na tela do PDV.",
+            {
+                "shortCode": short_code,
+                "voucher": self._build_log_context(),
+            },
+        )
 
         def worker() -> dict:
             promotion_sync: dict | None = None
@@ -1524,7 +2268,12 @@ class IntegracaoFrotaApp:
                 response["_promotionSync"] = promotion_sync
             return response
 
-        self._run_async(worker, self._apply_validation)
+        def on_success(response: dict) -> None:
+            self._apply_validation(response)
+            if callable(after_success):
+                after_success()
+
+        self._run_async(worker, on_success, operation="validacao_voucher", on_error=self._apply_validation_error)
 
     def _apply_validation(self, response: dict) -> None:
         promotion_sync = response.pop("_promotionSync", None)
@@ -1543,16 +2292,71 @@ class IntegracaoFrotaApp:
         )
         self.rule_var.set(self._build_rule_text(authorization))
         self.validity_var.set(self._build_validity_text(authorization))
+        self.voucher_details_var.set(self._build_voucher_details_text(voucher, authorization))
         self._set_conditions_text(self._build_conditions_text(authorization))
-        self.status_var.set("Voucher validado. Pressione F5 para autorizar no caixa atual.")
+        self._set_validation_feedback("Codigo validado", "success")
+        self.status_var.set("Codigo validado. Pressione OK ou F5 para autorizar no caixa.")
+        self.last_voucher_status = None
+        log_cashier_event(
+            logging.INFO,
+            "voucher_validation_approved",
+            "Voucher validado e liberado para pre-autorizacao.",
+            {
+                "shortCode": voucher["shortCode"],
+                "authorization": authorization,
+                "voucher": self._build_log_context(),
+            },
+        )
         self.confirm_button.focus_force()
         self._refresh_footer_actions()
+
+    def _apply_validation_error(self, message: str) -> None:
+        self._set_busy(False)
+        self.current_operation = "idle"
+        self._reset_validation_result()
+        normalized = (message or "").strip()
+        normalized_lower = normalized.lower()
+        if "inval" in normalized_lower:
+            self._set_validation_feedback("Codigo invalido", "error")
+            self.status_var.set("Codigo invalido.")
+            return
+
+        self._set_validation_feedback(normalized or "Falha na validacao do codigo.", "error")
+        self.status_var.set(normalized or "Falha na validacao do codigo.")
 
     def _set_conditions_text(self, text: str) -> None:
         self.conditions_text.configure(state="normal")
         self.conditions_text.delete("1.0", "end")
         self.conditions_text.insert("1.0", text)
         self.conditions_text.configure(state="disabled")
+
+    def _build_voucher_details_text(self, voucher: dict, authorization: dict) -> str:
+        lines = [
+            f"Codigo: {voucher.get('shortCode', '')}",
+            f"Desconto: {authorization.get('discountPercent', 0)}%",
+            f"Escopo: {self._build_scope_summary(authorization)}",
+            f"Status: {self._build_status_summary(authorization)}",
+        ]
+        return "\n".join(lines)
+
+    def _build_scope_summary(self, authorization: dict) -> str:
+        scope = authorization.get("scope", "ALL_PRODUCTS")
+        product_codes = authorization.get("productCodes") or []
+        product_group_codes = authorization.get("productGroupCodes") or []
+        if scope == "PRODUCT" and product_codes:
+            return f"Produtos {', '.join(str(item) for item in product_codes)}"
+        if scope == "PRODUCT_GROUP" and product_group_codes:
+            return f"Grupos {', '.join(str(item) for item in product_group_codes)}"
+        return "Todos os produtos"
+
+    def _build_status_summary(self, authorization: dict) -> str:
+        status = str(authorization.get("status") or "ACTIVE").upper()
+        label_map = {
+            "ACTIVE": "Ativo",
+            "EXPIRED": "Expirado",
+            "CANCELLED": "Cancelado",
+        }
+        return label_map.get(status, status)
 
     def _join_condition_values(self, values: list) -> str:
         cleaned = [str(value).strip() for value in values if str(value).strip()]
@@ -1578,63 +2382,80 @@ class IntegracaoFrotaApp:
             lines.append(f"Produtos: {self._join_condition_values(product_codes)}")
         elif scope == "PRODUCT_GROUP":
             lines.append(f"Grupos de produto: {self._join_condition_values(product_group_codes)}")
-        else:
-            lines.append("Produtos: Todos os produtos")
 
-        lines.append(f"Clientes especificos: {self._join_condition_values(customer_codes)}")
-        lines.append(f"Grupos de cliente: {self._join_condition_values(customer_group_codes)}")
-        lines.append(
-            "Primeira compra: "
-            + ("Sim" if authorization.get("firstPurchaseOnly") else "Nao")
-        )
-        lines.append(
-            "Cliente novo por dias: "
-            + self._format_condition_number(authorization.get("newCustomerDays"))
-        )
-        lines.append(f"Filiais liberadas: {self._join_condition_values(selected_branch_ids)}")
-        lines.append(f"Formas de pagamento: {self._join_condition_values(payment_form_codes)}")
-        lines.append(f"Dias da semana: {self._join_condition_values(active_weekdays)}")
+        if customer_codes:
+            lines.append(f"Clientes especificos: {self._join_condition_values(customer_codes)}")
+
+        if customer_group_codes:
+            lines.append(f"Grupos de cliente: {self._join_condition_values(customer_group_codes)}")
+
+        if authorization.get("firstPurchaseOnly"):
+            lines.append("Primeira compra: Sim")
+
+        if authorization.get("newCustomerDays"):
+            lines.append(
+                "Cliente novo por dias: "
+                + self._format_condition_number(authorization.get("newCustomerDays"))
+            )
+
+        if selected_branch_ids:
+            lines.append(f"Filiais liberadas: {self._join_condition_values(selected_branch_ids)}")
+
+        if payment_form_codes:
+            lines.append(f"Formas de pagamento: {self._join_condition_values(payment_form_codes)}")
+
+        if active_weekdays:
+            lines.append(f"Dias da semana: {self._join_condition_values(active_weekdays)}")
 
         start_time = authorization.get("startTime")
         end_time = authorization.get("endTime")
         if start_time or end_time:
             lines.append(f"Horario: {start_time or '--:--'} ate {end_time or '--:--'}")
-        else:
-            lines.append("Horario: Livre")
 
         if authorization.get("birthdayOnly"):
-            lines.append("Aniversario: Validado no app DataFrota; nao e validado localmente no caixa/PDV")
-        else:
-            lines.append("Aniversario: Nao configurado")
+            lines.append("Aniversario: Sim")
 
-        lines.append(
-            "Limite de desconto por dia: "
-            + self._format_condition_number(authorization.get("maxDiscountPerDay"))
-        )
-        lines.append(
-            "Limite de volume por dia: "
-            + self._format_condition_number(authorization.get("maxVolumePerDay"))
-        )
-        lines.append(
-            "Quantidade maxima por item: "
-            + self._format_condition_number(authorization.get("maxQuantityPerItem"))
-        )
-        lines.append(
-            "Resgates por cliente: "
-            + self._format_condition_number(authorization.get("redemptionsPerCustomer"))
-        )
-        lines.append(
-            "Compras por semana: "
-            + self._format_condition_number(authorization.get("maxPurchasesPerWeek"))
-        )
-        lines.append(
-            "Compras por mes: "
-            + self._format_condition_number(authorization.get("maxPurchasesPerMonth"))
-        )
-        lines.append(
-            "Reutilizavel: "
-            + ("Sim" if authorization.get("reusable") else "Nao")
-        )
+        if authorization.get("maxDiscountPerDay") is not None:
+            lines.append(
+                "Limite de desconto por dia: "
+                + self._format_condition_number(authorization.get("maxDiscountPerDay"))
+            )
+
+        if authorization.get("maxVolumePerDay") is not None:
+            lines.append(
+                "Limite de volume por dia: "
+                + self._format_condition_number(authorization.get("maxVolumePerDay"))
+            )
+
+        if authorization.get("maxQuantityPerItem") is not None:
+            lines.append(
+                "Quantidade maxima por item: "
+                + self._format_condition_number(authorization.get("maxQuantityPerItem"))
+            )
+
+        if authorization.get("redemptionsPerCustomer") is not None:
+            lines.append(
+                "Resgates por cliente: "
+                + self._format_condition_number(authorization.get("redemptionsPerCustomer"))
+            )
+
+        if authorization.get("maxPurchasesPerWeek") is not None:
+            lines.append(
+                "Compras por semana: "
+                + self._format_condition_number(authorization.get("maxPurchasesPerWeek"))
+            )
+
+        if authorization.get("maxPurchasesPerMonth") is not None:
+            lines.append(
+                "Compras por mes: "
+                + self._format_condition_number(authorization.get("maxPurchasesPerMonth"))
+            )
+
+        if authorization.get("reusable"):
+            lines.append("Reutilizavel: Sim")
+
+        if not lines:
+            return "Cupom aprovado sem restricoes adicionais."
 
         return "\n".join(lines)
 
@@ -1684,9 +2505,28 @@ class IntegracaoFrotaApp:
             return f"Valido a partir de {valid_from}"
         return "Sem data final informada no gerador."
 
+    def _build_log_context(self) -> dict:
+        validated_short_code = None
+        if isinstance(self.validated_voucher, dict):
+            validated_short_code = self.validated_voucher.get("shortCode")
+        return {
+            "typedShortCode": self.voucher_var.get().strip().upper(),
+            "validatedShortCode": validated_short_code,
+            "authorizationCreated": self.authorization_created,
+            "currentOperation": self.current_operation,
+            "lastVoucherStatus": self.last_voucher_status,
+            "cashierContext": dict(self.cashier_context),
+        }
+
     def _authorize_voucher(self) -> None:
         if not self.validated_voucher:
             self.status_var.set("Valide o voucher antes de confirmar.")
+            log_cashier_event(
+                logging.WARNING,
+                "voucher_authorization_blocked_without_validation",
+                "Tentativa de pre-autorizar voucher sem validacao previa.",
+                {"voucher": self._build_log_context()},
+            )
             return
 
         resolved_estacao = self.cashier_context.get("estacao") if self.cashier_context else None
@@ -1700,6 +2540,15 @@ class IntegracaoFrotaApp:
         }
 
         self.status_var.set("Registrando pre-autorizacao para o proximo item elegivel deste caixa...")
+        log_cashier_event(
+            logging.INFO,
+            "voucher_authorization_started",
+            "Pre-autorizacao do voucher iniciada.",
+            {
+                "payload": payload,
+                "voucher": self._build_log_context(),
+            },
+        )
         # #region debug-point A:python-authorize-start
         debug_report_cashier(
             "A",
@@ -1719,11 +2568,21 @@ class IntegracaoFrotaApp:
                 raise RuntimeError(response.get("error") or "Nao foi possivel registrar a pre-autorizacao.")
             return response
 
-        self._run_async(worker, self._apply_authorization)
+        self._run_async(worker, self._apply_authorization, operation="pre_autorizacao_voucher")
 
     def _apply_authorization(self, response: dict) -> None:
         item = response.get("item", {})
         self.authorization_created = True
+        self.last_voucher_status = str(item.get("status") or "P")
+        log_cashier_event(
+            logging.INFO,
+            "voucher_authorization_registered",
+            "Pre-autorizacao registrada no backend do PDV.",
+            {
+                "item": item,
+                "voucher": self._build_log_context(),
+            },
+        )
         # #region debug-point A:python-authorize-success
         debug_report_cashier(
             "A",
@@ -1740,7 +2599,7 @@ class IntegracaoFrotaApp:
         self.summary_var.set(
             f"Voucher {item.get('shortCode', '')} aguardando consumo na estacao {item.get('estacao', '')}."
         )
-        self._schedule_status_refresh(3500)
+        self.root.after(150, self.hide_window)
 
     def _cancel_status_refresh(self) -> None:
         if self.status_poll_job:
@@ -1757,6 +2616,15 @@ class IntegracaoFrotaApp:
             return
 
         short_code = self.validated_voucher["shortCode"]
+        log_cashier_event(
+            logging.INFO,
+            "voucher_status_poll_started",
+            "Consulta de status do voucher enviada para a API.",
+            {
+                "shortCode": short_code,
+                "voucher": self._build_log_context(),
+            },
+        )
 
         def worker() -> dict:
             response = self.api.get_status(short_code)
@@ -1764,11 +2632,13 @@ class IntegracaoFrotaApp:
                 raise RuntimeError(response.get("error") or "Nao foi possivel consultar o status.")
             return response
 
-        self._run_async(worker, self._apply_status)
+        self._run_async(worker, self._apply_status, operation="consulta_status_voucher")
 
     def _apply_status(self, response: dict) -> None:
         item = response.get("item", {})
         status = item.get("status", "P")
+        previous_status = self.last_voucher_status
+        self.last_voucher_status = str(status)
         if status == "R":
             self.status_var.set("Desconto reservado no cupom do AutoSystem.")
         elif status == "A":
@@ -1777,6 +2647,17 @@ class IntegracaoFrotaApp:
             self.status_var.set(item.get("error") or "A integracao retornou erro.")
         else:
             self.status_var.set(f"Pre-autorizacao registrada com status {status}.")
+        log_cashier_event(
+            logging.INFO if status in ("P", "R", "A") else logging.WARNING,
+            "voucher_status_updated",
+            "Status do voucher atualizado na tela do PDV.",
+            {
+                "previousStatus": previous_status,
+                "currentStatus": status,
+                "statusItem": item,
+                "voucher": self._build_log_context(),
+            },
+        )
 
         if status in ("P", "R") and self.authorization_created and self.validated_voucher:
             self._schedule_status_refresh(2000)
@@ -1784,12 +2665,29 @@ class IntegracaoFrotaApp:
     def shutdown(self) -> None:
         self._cancel_promotion_sync()
         self._cancel_status_refresh()
+        if self.ui_dispatch_job:
+            self.root.after_cancel(self.ui_dispatch_job)
+            self.ui_dispatch_job = None
+        if self.hotkey_listener_thread_id:
+            ctypes.windll.user32.PostThreadMessageW(self.hotkey_listener_thread_id, WM_QUIT, 0, 0)
+            self.hotkey_listener_thread_id = 0
         if self.hotkey_registered:
             ctypes.windll.user32.UnregisterHotKey(None, HOTKEY_ID)
         release_handle(self.show_event_handle)
 
 
 def main() -> None:
+    log_cashier_event(
+        logging.INFO,
+        "app_started",
+        "Aplicativo de integracao do PDV iniciado.",
+        {
+            "installDir": str(APP_INSTALL_DIR),
+            "appDataDir": str(APP_DATA_DIR),
+            "logFile": str(LOG_FILE),
+            "backupDir": str(LOG_BACKUP_DIR),
+        },
+    )
     # #region debug-point A:main-start
     debug_report(
         "A",
@@ -1801,6 +2699,12 @@ def main() -> None:
     mutex_handle = acquire_single_instance_mutex()
     if not mutex_handle:
         signal_sent = signal_existing_instance()
+        log_cashier_event(
+            logging.WARNING,
+            "app_single_instance_blocked",
+            "Segunda instancia do app foi bloqueada pelo mutex global.",
+            {"mutex": SINGLE_INSTANCE_MUTEX, "signalSent": signal_sent},
+        )
         debug_report(
             "F",
             "integracao_frota_app.py:main",
@@ -1822,6 +2726,12 @@ def main() -> None:
     # #endregion
 
     if not ensure_local_db_configuration(root):
+        log_cashier_event(
+            logging.WARNING,
+            "app_closed_missing_local_db_config",
+            "Aplicativo encerrado porque a configuracao do banco local nao foi concluida.",
+            {},
+        )
         # #region debug-point A:early-exit
         debug_report(
             "A",
@@ -1852,7 +2762,6 @@ def main() -> None:
 
     root.protocol("WM_DELETE_WINDOW", app.hide_window)
     root.bind("<Control-Shift-Q>", lambda _event: on_exit())
-    root.after(0, app.show_window)
     root.mainloop()
 
 

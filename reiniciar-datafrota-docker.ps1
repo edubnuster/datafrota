@@ -1,9 +1,18 @@
+param(
+  [string]$SaasRoot = "C:\databrev"
+)
+
 $ErrorActionPreference = "Stop"
 
-$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectRoot = $SaasRoot
 $composeProjectName = "datafrota"
 $backendTimeoutSeconds = 60
 $frontendTimeoutSeconds = 120
+$composeUpTimeoutSeconds = 180
+
+if (-not (Test-Path $projectRoot)) {
+  throw "Diretorio do SaaS web nao encontrado: $projectRoot"
+}
 
 function Write-Step {
   param([string]$Message)
@@ -68,49 +77,183 @@ function Invoke-Compose {
   }
 }
 
+function Invoke-ComposeWithEnvironment {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Args,
+    [hashtable]$EnvironmentOverrides = @{},
+    [int]$TimeoutSeconds = 0
+  )
+
+  $previousValues = @{}
+  foreach ($key in $EnvironmentOverrides.Keys) {
+    $previousValues[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
+    [Environment]::SetEnvironmentVariable($key, [string]$EnvironmentOverrides[$key], "Process")
+  }
+
+  try {
+    if ($TimeoutSeconds -gt 0) {
+      $result = Invoke-DockerProcess -Args (@("compose", "-p", $composeProjectName) + $Args) -TimeoutSeconds $TimeoutSeconds -EnvironmentOverrides $EnvironmentOverrides
+      if ($result.ExitCode -ne 0) {
+        throw "docker compose $($Args -join ' ') falhou com codigo $($result.ExitCode)."
+      }
+    } else {
+      Invoke-Compose -Args $Args
+    }
+  } finally {
+    foreach ($key in $EnvironmentOverrides.Keys) {
+      [Environment]::SetEnvironmentVariable($key, $previousValues[$key], "Process")
+    }
+  }
+}
+
+function Invoke-ComposeCapturingOutput {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Args,
+    [hashtable]$EnvironmentOverrides = @{},
+    [int]$TimeoutSeconds = 0
+  )
+
+  $result = Invoke-DockerProcess -Args (@("compose", "-p", $composeProjectName) + $Args) -EnvironmentOverrides $EnvironmentOverrides -TimeoutSeconds $TimeoutSeconds
+  return @{
+    ExitCode = $result.ExitCode
+    Output = (($result.StdOut, $result.StdErr | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n")
+  }
+}
+
+function Invoke-DockerProcess {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Args,
+    [int]$TimeoutSeconds = 0,
+    [hashtable]$EnvironmentOverrides = @{}
+  )
+
+  $dockerCommand = Get-Command docker -ErrorAction Stop
+  $dockerPath = if ($dockerCommand.Path) { $dockerCommand.Path } else { $dockerCommand.Source }
+  if ([string]::IsNullOrWhiteSpace($dockerPath)) {
+    throw "Nao foi possivel localizar o executavel do Docker."
+  }
+  $commandPreview = "docker " + ($Args -join " ")
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $dockerPath
+  $escapedArgs = $Args | ForEach-Object {
+    if ($_ -match '[\s"]') {
+      '"' + ($_ -replace '"', '\"') + '"'
+    } else {
+      $_
+    }
+  }
+  $startInfo.Arguments = ($escapedArgs -join ' ')
+  $startInfo.WorkingDirectory = $projectRoot
+  $startInfo.UseShellExecute = $false
+  $startInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $startInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $startInfo.CreateNoWindow = $true
+  foreach ($key in $EnvironmentOverrides.Keys) {
+    $startInfo.EnvironmentVariables[$key] = [string]$EnvironmentOverrides[$key]
+  }
+
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $startInfo
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  Write-Host "[debug] Iniciando comando: $commandPreview" -ForegroundColor DarkGray
+
+  try {
+    [void]$process.Start()
+    Write-Host "[debug] PID docker: $($process.Id)" -ForegroundColor DarkGray
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
+    if ($TimeoutSeconds -gt 0) {
+      if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        try {
+          $process.Kill()
+        } catch {
+          Write-Warning "Nao foi possivel encerrar o processo docker preso: $($_.Exception.Message)"
+        }
+        throw "docker $($Args -join ' ') excedeu o timeout de $TimeoutSeconds segundos."
+      }
+    } else {
+      $process.WaitForExit()
+    }
+
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    $process.WaitForExit()
+    $stopwatch.Stop()
+    Write-Host "[debug] Comando finalizado em $([math]::Round($stopwatch.Elapsed.TotalSeconds, 2))s com exit code $($process.ExitCode)" -ForegroundColor DarkGray
+
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+      Write-Host $stdout.TrimEnd()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+      Write-Host $stderr.TrimEnd()
+    }
+
+    return @{
+      ExitCode = $process.ExitCode
+      StdOut = $stdout
+      StdErr = $stderr
+    }
+  } finally {
+    try {
+      if ($process) {
+        $process.Dispose()
+      }
+    } catch {
+    }
+  }
+}
+
 function Invoke-ComposeWithTimeout {
   param(
     [Parameter(Mandatory = $true)][string[]]$Args,
     [int]$TimeoutSeconds = 30
   )
 
-  $dockerPath = (Get-Command docker -ErrorAction Stop).Source
-  $argumentList = @("compose", "-p", $composeProjectName) + $Args
-  $process = Start-Process -FilePath $dockerPath -ArgumentList $argumentList -WorkingDirectory $projectRoot -PassThru -NoNewWindow
+  $result = Invoke-DockerProcess -Args (@("compose", "-p", $composeProjectName) + $Args) -TimeoutSeconds $TimeoutSeconds
+  if ($result.ExitCode -ne 0) {
+    throw "docker compose $($Args -join ' ') falhou com codigo $($result.ExitCode)."
+  }
+}
 
-  if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-    try {
-      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-    } catch {
-      Write-Warning "Nao foi possivel encerrar o processo docker compose preso: $($_.Exception.Message)"
-    }
-    throw "docker compose $($Args -join ' ') excedeu o timeout de $TimeoutSeconds segundos."
+function Invoke-ComposeUpWithBuildFallback {
+  $primaryEnv = @{
+    BUILDKIT_PROGRESS = "plain"
+  }
+  $fallbackEnv = @{
+    BUILDKIT_PROGRESS = "plain"
+    COMPOSE_BAKE = "false"
+    DOCKER_BUILDKIT = "0"
+    COMPOSE_DOCKER_CLI_BUILD = "0"
   }
 
-  if ($process.ExitCode -ne 0) {
-    throw "docker compose $($Args -join ' ') falhou com codigo $($process.ExitCode)."
+  $primaryResult = Invoke-ComposeCapturingOutput -Args @("up", "-d", "--build") -EnvironmentOverrides $primaryEnv -TimeoutSeconds $composeUpTimeoutSeconds
+  if ($primaryResult.ExitCode -eq 0) {
+    return
   }
+
+  if ($primaryResult.Output -match [regex]::Escape("failed to execute bake: read |0: file already closed")) {
+    Write-Warning "Docker Compose falhou no caminho Buildx/Bake. Repetindo com fallback sem BuildKit."
+    Invoke-ComposeWithEnvironment -Args @("up", "-d", "--build") -EnvironmentOverrides $fallbackEnv -TimeoutSeconds $composeUpTimeoutSeconds
+    return
+  }
+
+  throw "docker compose up -d --build falhou com codigo $($primaryResult.ExitCode)."
 }
 
 function Remove-StaleContainers {
   $containerNames = @("datafrota-backend", "datafrota-frontend")
-  $dockerPath = (Get-Command docker -ErrorAction Stop).Source
   foreach ($containerName in $containerNames) {
     try {
-      $process = Start-Process -FilePath $dockerPath -ArgumentList @("rm", "-f", $containerName) -WorkingDirectory $projectRoot -PassThru -NoNewWindow
-      if (-not $process.WaitForExit(15000)) {
-        try {
-          Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        } catch {
-          Write-Warning "Nao foi possivel encerrar o docker rm preso para ${containerName}: $($_.Exception.Message)"
-        }
-        throw "docker rm -f ${containerName} excedeu o timeout de 15 segundos."
-      }
-
-      if ($process.ExitCode -eq 0) {
+      $result = Invoke-DockerProcess -Args @("rm", "-f", $containerName) -TimeoutSeconds 15
+      if ($result.ExitCode -eq 0) {
         Write-Host "Container $containerName removido a forca." -ForegroundColor Yellow
-      } elseif ($process.ExitCode -ne 1) {
-        throw "docker rm -f ${containerName} falhou com codigo $($process.ExitCode)."
+      } elseif (($result.StdErr + $result.StdOut) -match "No such container") {
+        Write-Host "Container $containerName ja nao existe." -ForegroundColor DarkYellow
+      } else {
+        throw "docker rm -f ${containerName} falhou com codigo $($result.ExitCode)."
       }
     } catch {
       Write-Warning "Falha ao remover ${containerName}: $($_.Exception.Message)"
@@ -121,6 +264,10 @@ function Remove-StaleContainers {
 
 Write-Step "Reiniciando stack Docker do DATAFROTA"
 Set-Location $projectRoot
+$scriptInfo = Get-Item -LiteralPath $MyInvocation.MyCommand.Path
+Write-Host "[debug] Script em execucao: $($scriptInfo.FullName)" -ForegroundColor DarkGray
+Write-Host "[debug] Ultima modificacao: $($scriptInfo.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray
+Write-Host "[debug] Diretorio SaaS/Docker: $projectRoot" -ForegroundColor DarkGray
 
 Write-Step "Derrubando containers antigos"
 try {
@@ -131,7 +278,7 @@ try {
 }
 
 Write-Step "Subindo frontend e backend com rebuild"
-Invoke-Compose -Args @("up", "-d", "--build")
+Invoke-ComposeUpWithBuildFallback
 
 Write-Step "Aguardando backend"
 Wait-HttpReady -Name "Backend" -Service "backend" -Url "http://127.0.0.1:3001/api/health" -TimeoutSeconds $backendTimeoutSeconds

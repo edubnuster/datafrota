@@ -669,6 +669,8 @@ export async function ensureCashierSchema(force = false): Promise<void> {
           reusable BOOLEAN NOT NULL DEFAULT FALSE,
           resolved_branch_id TEXT NULL,
           resolved_customer_code TEXT NULL,
+          subtotal_elegivel NUMERIC(15,2) NULL,
+          quantidade_elegivel NUMERIC(15,3) NULL,
           mensagem_doc TEXT NULL,
           mensagem_pdv TEXT NULL,
           erro TEXT NULL,
@@ -773,6 +775,12 @@ export async function ensureCashierSchema(force = false): Promise<void> {
         ALTER TABLE datafrota_desconto_pendente
           ADD COLUMN IF NOT EXISTS resolved_customer_code TEXT NULL;
 
+        ALTER TABLE datafrota_desconto_pendente
+          ADD COLUMN IF NOT EXISTS subtotal_elegivel NUMERIC(15,2) NULL;
+
+        ALTER TABLE datafrota_desconto_pendente
+          ADD COLUMN IF NOT EXISTS quantidade_elegivel NUMERIC(15,3) NULL;
+
         UPDATE datafrota_desconto_pendente
            SET product_codes = ARRAY[product_code]
          WHERE product_code IS NOT NULL
@@ -814,6 +822,18 @@ export async function ensureCashierSchema(force = false): Promise<void> {
         UPDATE datafrota_desconto_pendente
            SET birthday_only = FALSE
          WHERE birthday_only IS NULL;
+
+        UPDATE datafrota_desconto_pendente
+           SET subtotal_elegivel = ROUND((valor_desconto * 100.0) / NULLIF(percentual_desconto, 0), 2)
+         WHERE subtotal_elegivel IS NULL
+           AND status IN ('R', 'A')
+           AND valor_desconto IS NOT NULL
+           AND percentual_desconto IS NOT NULL;
+
+        UPDATE datafrota_desconto_pendente
+           SET quantidade_elegivel = quantidade
+         WHERE quantidade_elegivel IS NULL
+           AND quantidade IS NOT NULL;
 
         ALTER TABLE datafrota_desconto_pendente
           ADD COLUMN IF NOT EXISTS caixa_data DATE NULL;
@@ -1135,7 +1155,11 @@ export async function ensureCashierSchema(force = false): Promise<void> {
             v_caixa_empresa bigint;
             v_sale_date date;
             v_sale_weekday text;
-            v_valor_desconto numeric(15,2);
+            v_subtotal_elegivel numeric(15,2);
+            v_quantidade_elegivel numeric(15,3);
+            v_valor_desconto_total numeric(15,2);
+            v_valor_desconto_anterior numeric(15,2);
+            v_valor_desconto_delta numeric(15,2);
             v_product_code text;
             v_product_group_code text;
             v_product_type text;
@@ -1219,11 +1243,13 @@ export async function ensureCashierSchema(force = false): Promise<void> {
             SELECT d.*
               INTO v_desc
               FROM public.datafrota_desconto_pendente d
-             WHERE d.status = 'P'
-               AND d.validade >= now()
+             WHERE d.validade >= now()
                AND split_part(UPPER(COALESCE(d.estacao, '')), '.', 1) =
                    split_part(UPPER(COALESCE(NEW.estacao, '')), '.', 1)
-               AND (d.abastecimento IS NULL OR d.abastecimento = NEW.abastecimento)
+               AND (
+                 (d.status = 'P' AND (d.abastecimento IS NULL OR d.abastecimento = NEW.abastecimento))
+                 OR (d.status = 'R' AND d.mlid = v_mlid)
+               )
               AND (
                 cardinality(COALESCE(d.branch_ids, ARRAY[]::text[])) = 0
                 OR CAST(v_caixa_empresa AS text) = ANY(COALESCE(d.branch_ids, ARRAY[]::text[]))
@@ -1321,7 +1347,12 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                    )
                  )
                )
-             ORDER BY d.criado_em
+             ORDER BY
+               CASE
+                 WHEN d.status = 'R' AND d.mlid = v_mlid THEN 0
+                 ELSE 1
+               END,
+               d.criado_em
              LIMIT 1
              FOR UPDATE;
 
@@ -1366,13 +1397,24 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                 RETURN NEW;
             END IF;
 
-            IF v_desc.valor_desconto IS NOT NULL THEN
-                v_valor_desconto := v_desc.valor_desconto;
+            IF v_desc.status = 'R' AND v_desc.mlid = v_mlid THEN
+                v_subtotal_elegivel := COALESCE(
+                    v_desc.subtotal_elegivel,
+                    ROUND((COALESCE(v_desc.valor_desconto, 0) * 100.0) / NULLIF(v_desc.percentual_desconto, 0), 2),
+                    0
+                ) + NEW.valor;
+                v_quantidade_elegivel := COALESCE(v_desc.quantidade_elegivel, 0) + COALESCE(NEW.quantidade, 0);
+                v_valor_desconto_anterior := COALESCE(v_desc.valor_desconto, 0);
             ELSE
-                v_valor_desconto := ROUND((NEW.valor * (v_desc.percentual_desconto / 100.0))::numeric, 2);
+                v_subtotal_elegivel := NEW.valor;
+                v_quantidade_elegivel := COALESCE(NEW.quantidade, 0);
+                v_valor_desconto_anterior := 0;
             END IF;
 
-            IF v_valor_desconto <= 0 THEN
+            v_valor_desconto_total := ROUND((v_subtotal_elegivel * (v_desc.percentual_desconto / 100.0))::numeric, 2);
+            v_valor_desconto_delta := v_valor_desconto_total - v_valor_desconto_anterior;
+
+            IF v_valor_desconto_total <= 0 THEN
                 UPDATE public.datafrota_desconto_pendente
                    SET status = 'E',
                        erro = 'Valor de desconto invalido'
@@ -1381,10 +1423,19 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                 RETURN NEW;
             END IF;
 
-            IF v_valor_desconto > NEW.valor THEN
+            IF v_valor_desconto_delta < 0 THEN
                 UPDATE public.datafrota_desconto_pendente
                    SET status = 'E',
-                       erro = 'Desconto superior ao valor do item'
+                       erro = 'Recalculo do desconto retornou valor inconsistente'
+                 WHERE grid = v_desc.grid;
+
+                RETURN NEW;
+            END IF;
+
+            IF v_valor_desconto_delta > NEW.valor THEN
+                UPDATE public.datafrota_desconto_pendente
+                   SET status = 'E',
+                       erro = 'Desconto incremental superior ao valor do item'
                  WHERE grid = v_desc.grid;
 
                 RETURN NEW;
@@ -1399,7 +1450,7 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                    AND d.status IN ('R', 'A')
                    AND d.caixa_data = v_sale_date;
 
-                IF (COALESCE(v_total_discount_day, 0) + v_valor_desconto) > v_desc.max_discount_per_day THEN
+                IF (COALESCE(v_total_discount_day, 0) + v_valor_desconto_total) > v_desc.max_discount_per_day THEN
                     UPDATE public.datafrota_desconto_pendente
                        SET status = 'E',
                            erro = 'Limite de desconto por dia excedido para esta promocao'
@@ -1410,7 +1461,7 @@ export async function ensureCashierSchema(force = false): Promise<void> {
             END IF;
 
             IF v_desc.max_volume_per_day IS NOT NULL THEN
-                SELECT COALESCE(SUM(COALESCE(d.quantidade, 0)), 0)
+                SELECT COALESCE(SUM(COALESCE(d.quantidade_elegivel, d.quantidade, 0)), 0)
                   INTO v_total_volume_day
                   FROM public.datafrota_desconto_pendente d
                  WHERE d.discount_authorization_id = v_desc.discount_authorization_id
@@ -1418,7 +1469,7 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                    AND d.status IN ('R', 'A')
                    AND d.caixa_data = v_sale_date;
 
-                IF (COALESCE(v_total_volume_day, 0) + COALESCE(v_desc.quantidade, NEW.quantidade, 0)) > v_desc.max_volume_per_day THEN
+                IF (COALESCE(v_total_volume_day, 0) + v_quantidade_elegivel) > v_desc.max_volume_per_day THEN
                     UPDATE public.datafrota_desconto_pendente
                        SET status = 'E',
                            erro = 'Limite de volume por dia excedido para esta promocao'
@@ -1442,36 +1493,38 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                 END IF;
             END IF;
 
-            INSERT INTO public.lancto_caixa_promo (
-                lancto_caixa,
-                beneficio,
-                valor_desconto,
-                mensagem_doc,
-                mensagem_pdv,
-                mlid,
-                codigo,
-                quantidade,
-                resgate,
-                appid,
-                parametro_opcional
-            )
-            VALUES (
-                NEW.codigo,
-                'DATAFROTA',
-                v_valor_desconto,
-                COALESCE(v_desc.mensagem_doc, 'DESCONTO FIDELIDADE DATAFROTA'),
-                COALESCE(v_desc.mensagem_pdv, 'DATAFROTA - CODIGO ' || v_desc.codigo_desconto),
-                v_mlid,
-                v_desc.codigo_desconto,
-                COALESCE(v_desc.quantidade, NEW.quantidade),
-                false,
-                0,
-                NULL
-            );
+            IF v_valor_desconto_delta > 0 THEN
+                INSERT INTO public.lancto_caixa_promo (
+                    lancto_caixa,
+                    beneficio,
+                    valor_desconto,
+                    mensagem_doc,
+                    mensagem_pdv,
+                    mlid,
+                    codigo,
+                    quantidade,
+                    resgate,
+                    appid,
+                    parametro_opcional
+                )
+                VALUES (
+                    NEW.codigo,
+                    'DATAFROTA',
+                    v_valor_desconto_delta,
+                    COALESCE(v_desc.mensagem_doc, 'DESCONTO FIDELIDADE DATAFROTA'),
+                    COALESCE(v_desc.mensagem_pdv, 'DATAFROTA - CODIGO ' || v_desc.codigo_desconto),
+                    v_mlid,
+                    v_desc.codigo_desconto,
+                    COALESCE(NEW.quantidade, 0),
+                    false,
+                    0,
+                    NULL
+                );
+            END IF;
 
             UPDATE public.datafrota_desconto_pendente
                SET status = 'R',
-                   reservado_em = now(),
+                   reservado_em = COALESCE(v_desc.reservado_em, now()),
                    conta = NEW.conta,
                    abastecimento = COALESCE(v_desc.abastecimento, NEW.abastecimento),
                    caixa_data = COALESCE(v_desc.caixa_data, v_caixa_data, NEW.dia_fiscal),
@@ -1481,7 +1534,9 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                    resolved_customer_code = COALESCE(v_desc.resolved_customer_code, v_customer_code),
                    lancto_caixa = NEW.codigo,
                    mlid = v_mlid,
-                   valor_desconto = v_valor_desconto,
+                   valor_desconto = v_valor_desconto_total,
+                   subtotal_elegivel = v_subtotal_elegivel,
+                   quantidade_elegivel = v_quantidade_elegivel,
                    erro = NULL
              WHERE grid = v_desc.grid;
 
@@ -1557,7 +1612,6 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                 IF v_customer_validation_error IS NOT NULL THEN
                     DELETE FROM public.lancto_caixa_promo
                      WHERE codigo = v_desc.codigo_desconto
-                       AND lancto_caixa = v_desc.lancto_caixa
                        AND mlid = v_desc.mlid;
 
                     UPDATE public.datafrota_desconto_pendente
@@ -1595,7 +1649,6 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                 ELSIF v_valor_venda > 0 AND v_total_pago >= v_valor_venda THEN
                     DELETE FROM public.lancto_caixa_promo
                      WHERE codigo = v_desc.codigo_desconto
-                       AND lancto_caixa = v_desc.lancto_caixa
                        AND mlid = v_desc.mlid;
 
                     UPDATE public.datafrota_desconto_pendente
@@ -1668,7 +1721,6 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                 IF v_customer_validation_error IS NOT NULL THEN
                     DELETE FROM public.lancto_caixa_promo
                      WHERE codigo = v_desc.codigo_desconto
-                       AND lancto_caixa = v_desc.lancto_caixa
                        AND mlid = v_desc.mlid;
 
                     UPDATE public.datafrota_desconto_pendente
@@ -1711,7 +1763,6 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                     ELSIF v_valor_venda > 0 AND v_total_pago >= v_valor_venda THEN
                         DELETE FROM public.lancto_caixa_promo
                          WHERE codigo = v_desc.codigo_desconto
-                           AND lancto_caixa = v_desc.lancto_caixa
                            AND mlid = v_desc.mlid;
 
                         UPDATE public.datafrota_desconto_pendente

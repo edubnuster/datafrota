@@ -1,6 +1,6 @@
 {
-  "serverTime": "2026-07-17T18:41:20.387Z",
-  "savedAt": "2026-07-17T15:41:20",
+  "serverTime": "2026-07-18T01:53:52.502Z",
+  "savedAt": "2026-07-17T22:53:52",
   "items": [
     {
       "promotionId": "promo_mroentyjhp1a1x",
@@ -15,7 +15,8 @@
       "productGroupCodes": [
         "7",
         "103",
-        "104"
+        "104",
+        "1"
       ],
       "audienceMode": "all",
       "customerCodes": [],
@@ -47,19 +48,19 @@
         "sab"
       ],
       "birthdayOnly": true,
-      "maxDiscountPerDay": "10",
+      "maxDiscountPerDay": "100",
       "maxVolumePerDay": "",
       "maxQuantityPerItem": "",
-      "redemptionsPerCustomer": "1",
+      "redemptionsPerCustomer": "",
       "maxPurchasesPerWeek": "",
       "maxPurchasesPerMonth": "",
       "couponValidityMinutes": "15",
-      "updatedAt": "2026-07-17T03:55:47.948Z",
+      "updatedAt": "2026-07-17T21:03:47.263Z",
       "integration": {
         "state": "published",
         "authorizationId": "dau_mroentzqmtxeyf",
         "error": null,
-        "syncedAt": "2026-07-17T03:55:47.999Z"
+        "syncedAt": "2026-07-17T21:03:47.309Z"
       }
     },
     {

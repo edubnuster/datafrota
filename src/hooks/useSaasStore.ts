@@ -109,7 +109,7 @@ export const useSaasStore = create<SaasStoreState>((set, get) => ({
 
       if (!company) {
         set({
-          authError: "Credenciais invalidas. Use o acesso administrativo do SaaS ou o login da empresa.",
+          authError: "Credenciais inválidas.",
         });
         return false;
       }

@@ -21,6 +21,43 @@ function mapRows(
     }));
 }
 
+function filterReferenceOptions(
+  items: ReferenceOption[],
+  term: string,
+  selectedCodes: string[],
+  limit: number,
+): ReferenceOption[] {
+  const normalizedTerm = term.trim().toLowerCase();
+  const selectedSet = new Set(selectedCodes);
+
+  return items
+    .filter((item) => {
+      if (selectedSet.has(item.code)) {
+        return true;
+      }
+
+      if (!normalizedTerm) {
+        return true;
+      }
+
+      return item.code.toLowerCase().includes(normalizedTerm) || item.name.toLowerCase().includes(normalizedTerm);
+    })
+    .sort((left, right) => {
+      const selectedDelta = Number(selectedSet.has(right.code)) - Number(selectedSet.has(left.code));
+      if (selectedDelta !== 0) {
+        return selectedDelta;
+      }
+
+      const nameDelta = left.name.localeCompare(right.name, "pt-BR");
+      if (nameDelta !== 0) {
+        return nameDelta;
+      }
+
+      return left.code.localeCompare(right.code, "pt-BR", { numeric: true });
+    })
+    .slice(0, limit + selectedSet.size);
+}
+
 export async function listReferenceData(
   type: ReferenceDataType,
   search = "",
@@ -136,24 +173,49 @@ export async function listReferenceData(
   }
 
   if (type === "product-groups") {
-    const result = await query<{ code: number; nameHex: string; sortName: string }>(
+    const result = await query<{ code: number }>(
       `
         SELECT DISTINCT
-          gp.codigo AS code,
-          ENCODE(CONVERT_TO(gp.nome, 'LATIN1'), 'hex') AS "nameHex",
-          gp.nome AS "sortName"
+          gp.codigo AS code
         FROM grupo_produto gp
         INNER JOIN produto p
           ON CAST(p.grupo AS TEXT) = CAST(gp.grid AS TEXT)
         WHERE p.flag = 'A'
-          AND ($1 = '' OR CAST(gp.codigo AS TEXT) ILIKE '%' || $1 || '%' OR gp.nome ILIKE '%' || $1 || '%')
-        ORDER BY "sortName" ASC
-        LIMIT $2
+        ORDER BY gp.codigo ASC
       `,
-      [term, hasSearch ? 50 : 100],
+      [],
     );
 
-    return mapRows(result.rows);
+    const items: ReferenceOption[] = [];
+
+    for (const row of result.rows) {
+      try {
+        const groupResult = await query<{ name: string }>(
+          `
+            SELECT nome AS name
+            FROM grupo_produto
+            WHERE codigo = $1
+            ORDER BY grid DESC
+            LIMIT 1
+          `,
+          [row.code],
+        );
+        const name = String(groupResult.rows[0]?.name || "").trim();
+
+        if (!name) {
+          continue;
+        }
+
+        items.push({
+          code: String(row.code),
+          name,
+        });
+      } catch {
+        // Ignore legacy rows with invalid encoding instead of aborting the full list.
+      }
+    }
+
+    return filterReferenceOptions(items, term, normalizedSelectedCodes, hasSearch ? 50 : 100);
   }
 
   if (type === "customers") {
@@ -212,11 +274,18 @@ export async function listReferenceData(
         ENCODE(CONVERT_TO(nome, 'LATIN1'), 'hex') AS "nameHex"
       FROM grupo_pessoa
       WHERE flag = 'A'
-        AND ($1 = '' OR CAST(codigo AS TEXT) ILIKE '%' || $1 || '%' OR nome ILIKE '%' || $1 || '%')
-      ORDER BY nome ASC
-      LIMIT $2
+        AND (
+          $1 = ''
+          OR CAST(codigo AS TEXT) ILIKE '%' || $1 || '%'
+          OR nome ILIKE '%' || $1 || '%'
+          OR CAST(codigo AS TEXT) = ANY($2)
+        )
+      ORDER BY
+        CASE WHEN CAST(codigo AS TEXT) = ANY($2) THEN 0 ELSE 1 END,
+        nome ASC
+      LIMIT ($3 + COALESCE(array_length($2, 1), 0))
     `,
-    [term, hasSearch ? 50 : 100],
+    [term, normalizedSelectedCodes, hasSearch ? 50 : 100],
   );
 
   return mapRows(result.rows);
