@@ -1,17 +1,32 @@
 param(
-  [string]$SaasRoot = "C:\databrev"
+  [string]$SaasRoot = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-$projectRoot = $SaasRoot
+$scriptRoot = if ($PSScriptRoot) {
+  $PSScriptRoot
+} else {
+  Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+
+$projectRoot = if ([string]::IsNullOrWhiteSpace($SaasRoot)) {
+  $scriptRoot
+} else {
+  $SaasRoot
+}
 $composeProjectName = "datafrota"
+$composeFilePath = Join-Path $projectRoot "docker-compose.yml"
 $backendTimeoutSeconds = 60
 $frontendTimeoutSeconds = 120
 $composeUpTimeoutSeconds = 180
 
 if (-not (Test-Path $projectRoot)) {
   throw "Diretorio do SaaS web nao encontrado: $projectRoot"
+}
+
+if (-not (Test-Path $composeFilePath)) {
+  throw "Arquivo docker-compose.yml nao encontrado em: $composeFilePath"
 }
 
 function Write-Step {
@@ -49,7 +64,7 @@ function Wait-HttpReady {
 
   Write-Warning "$Name indisponivel apos $attempt tentativa(s). Ultimo erro: $lastError"
   try {
-    docker compose ps -a
+    docker compose -f $composeFilePath -p $composeProjectName ps -a
   } catch {
     Write-Warning "Nao foi possivel coletar o estado dos containers: $($_.Exception.Message)"
   }
@@ -57,7 +72,7 @@ function Wait-HttpReady {
   if ($Service) {
     try {
       Write-Warning "Ultimos logs de ${Service}:"
-      docker compose logs $Service --tail 120
+      docker compose -f $composeFilePath -p $composeProjectName logs $Service --tail 120
     } catch {
       Write-Warning "Nao foi possivel coletar os logs de ${Service}: $($_.Exception.Message)"
     }
@@ -71,7 +86,7 @@ function Invoke-Compose {
     [Parameter(Mandatory = $true)][string[]]$Args
   )
 
-  & docker compose -p $composeProjectName @Args
+  & docker compose -f $composeFilePath -p $composeProjectName @Args
   if ($LASTEXITCODE -ne 0) {
     throw "docker compose $($Args -join ' ') falhou com codigo $LASTEXITCODE."
   }
@@ -92,7 +107,7 @@ function Invoke-ComposeWithEnvironment {
 
   try {
     if ($TimeoutSeconds -gt 0) {
-      $result = Invoke-DockerProcess -Args (@("compose", "-p", $composeProjectName) + $Args) -TimeoutSeconds $TimeoutSeconds -EnvironmentOverrides $EnvironmentOverrides
+      $result = Invoke-DockerProcess -Args (@("compose", "-f", $composeFilePath, "-p", $composeProjectName) + $Args) -TimeoutSeconds $TimeoutSeconds -EnvironmentOverrides $EnvironmentOverrides
       if ($result.ExitCode -ne 0) {
         throw "docker compose $($Args -join ' ') falhou com codigo $($result.ExitCode)."
       }
@@ -113,7 +128,7 @@ function Invoke-ComposeCapturingOutput {
     [int]$TimeoutSeconds = 0
   )
 
-  $result = Invoke-DockerProcess -Args (@("compose", "-p", $composeProjectName) + $Args) -EnvironmentOverrides $EnvironmentOverrides -TimeoutSeconds $TimeoutSeconds
+  $result = Invoke-DockerProcess -Args (@("compose", "-f", $composeFilePath, "-p", $composeProjectName) + $Args) -EnvironmentOverrides $EnvironmentOverrides -TimeoutSeconds $TimeoutSeconds
   return @{
     ExitCode = $result.ExitCode
     Output = (($result.StdOut, $result.StdErr | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n")
@@ -212,7 +227,7 @@ function Invoke-ComposeWithTimeout {
     [int]$TimeoutSeconds = 30
   )
 
-  $result = Invoke-DockerProcess -Args (@("compose", "-p", $composeProjectName) + $Args) -TimeoutSeconds $TimeoutSeconds
+  $result = Invoke-DockerProcess -Args (@("compose", "-f", $composeFilePath, "-p", $composeProjectName) + $Args) -TimeoutSeconds $TimeoutSeconds
   if ($result.ExitCode -ne 0) {
     throw "docker compose $($Args -join ' ') falhou com codigo $($result.ExitCode)."
   }
@@ -268,6 +283,7 @@ $scriptInfo = Get-Item -LiteralPath $MyInvocation.MyCommand.Path
 Write-Host "[debug] Script em execucao: $($scriptInfo.FullName)" -ForegroundColor DarkGray
 Write-Host "[debug] Ultima modificacao: $($scriptInfo.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray
 Write-Host "[debug] Diretorio SaaS/Docker: $projectRoot" -ForegroundColor DarkGray
+Write-Host "[debug] Arquivo Compose: $composeFilePath" -ForegroundColor DarkGray
 
 Write-Step "Derrubando containers antigos"
 try {
