@@ -31,7 +31,7 @@ type PromotionSyncUpdate = {
 type PromotionWithSyncRow = {
   id: string;
   name: string;
-  voucher_code: string;
+  voucher_code: string | null;
   status: Promotion["status"];
   payload: CreatePromotionInput | string;
   created_at: string | Date;
@@ -83,7 +83,7 @@ export function mapPromotionWithIntegration(row: PromotionWithSyncRow): Promotio
     id: row.id,
     ...payload,
     name: row.name,
-    voucherCode: row.voucher_code,
+    voucherCode: row.voucher_code ?? payload.voucherCode ?? "",
     status: row.status,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
@@ -92,13 +92,7 @@ export function mapPromotionWithIntegration(row: PromotionWithSyncRow): Promotio
 }
 
 function buildPromotionSyncIssues(promotion: Promotion): string[] {
-  const issues: string[] = [];
-
-  if (promotion.discountType !== "percent") {
-    issues.push("O fluxo operacional atual do PDV aceita apenas desconto percentual.");
-  }
-
-  return issues;
+  return [];
 }
 
 function buildPromotionValidity(date: string, time: string, defaultTime: string): string | null {
@@ -110,8 +104,8 @@ function buildPromotionValidity(date: string, time: string, defaultTime: string)
   return `${date}T${resolvedTime}:00`;
 }
 
-function buildDiscountInputFromPromotion(promotion: Promotion): CreateDiscountCodeInput {
-  const discountPercent = Number(promotion.discountValue);
+export function buildDiscountInputFromPromotion(promotion: Promotion): CreateDiscountCodeInput {
+  const numericDiscountValue = Number(promotion.discountValue.replace(",", "."));
   const parseOptionalNumber = (value: string): number | null => {
     if (!value.trim()) {
       return null;
@@ -145,9 +139,15 @@ function buildDiscountInputFromPromotion(promotion: Promotion): CreateDiscountCo
     maxPurchasesPerWeek: parseOptionalNumber(promotion.maxPurchasesPerWeek),
     maxPurchasesPerMonth: parseOptionalNumber(promotion.maxPurchasesPerMonth),
     reusable: true,
-    discountPercent,
+    discountType: promotion.discountType,
+    discountPercent: promotion.discountType === "percent" ? numericDiscountValue : null,
+    discountValue: promotion.discountType === "fixed" ? numericDiscountValue : null,
     validFrom: buildPromotionValidity(promotion.startDate, promotion.startTime, "00:00"),
     validUntil: buildPromotionValidity(promotion.endDate, promotion.endTime, "23:59"),
+    promotionId: promotion.id,
+    promotionName: promotion.name,
+    voucherOrigin: promotion.voucherMode === "fixed" ? "promotion_fixed" : "manual",
+    requireCustomerDocumentAtCashier: promotion.requireCustomerDocumentAtCashier,
   };
 }
 
@@ -190,6 +190,18 @@ async function cancelPublishedVoucher(shortCode: string): Promise<string | null>
 }
 
 export async function syncPromotionPublication(promotion: Promotion): Promise<PromotionPdvIntegration> {
+  if (promotion.voucherMode !== "fixed" || !promotion.voucherCode.trim()) {
+    const authorizationId = promotion.integration?.authorizationId ?? null;
+    if (promotion.integration?.authorizationId || promotion.voucherCode.trim()) {
+      await cancelPublishedVoucher(promotion.voucherCode);
+    }
+    return savePromotionSyncState(promotion.id, {
+      authorizationId,
+      state: "cancelled",
+      error: null,
+    });
+  }
+
   if (promotion.status === "pausada" || promotion.status === "encerrada") {
     const authorizationId = await cancelPublishedVoucher(promotion.voucherCode);
     return savePromotionSyncState(promotion.id, {
@@ -240,6 +252,9 @@ export async function syncPromotionPublication(promotion: Promotion): Promise<Pr
 }
 
 export async function cancelPromotionPublication(promotion: Promotion): Promise<void> {
+  if (!promotion.voucherCode.trim()) {
+    return;
+  }
   await cancelPublishedVoucher(promotion.voucherCode);
 }
 
@@ -273,6 +288,7 @@ export async function listPdvPromotionsForSync(): Promise<PdvPromotionSyncRespon
     return {
       promotionId: promotion.id,
       name: promotion.name,
+      voucherMode: promotion.voucherMode,
       voucherCode: promotion.voucherCode,
       status: promotion.status,
       description: promotion.description,
@@ -309,6 +325,7 @@ export async function listPdvPromotionsForSync(): Promise<PdvPromotionSyncRespon
 
   return {
     serverTime: new Date().toISOString(),
+    promotionCursor: 1,
     itemCount: items.length,
     items,
   };

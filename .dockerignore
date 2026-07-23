@@ -11,3 +11,7 @@ coverage
 cashier_app/__pycache__
 **/__pycache__
 **/*.pyc
+mobile_app
+mobile
+cashier_app
+app-py

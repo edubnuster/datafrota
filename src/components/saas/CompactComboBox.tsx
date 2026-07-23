@@ -24,6 +24,8 @@ export default function CompactComboBox({
   className,
 }: CompactComboBoxProps) {
   const [open, setOpen] = useState(false);
+  const [openDirection, setOpenDirection] = useState<"up" | "down">("down");
+  const [menuMaxHeight, setMenuMaxHeight] = useState(256);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   const selectedOption = useMemo(
@@ -34,6 +36,28 @@ export default function CompactComboBox({
   useEffect(() => {
     if (!open) {
       return;
+    }
+
+    const preferredMenuHeight = 256;
+    const minimumVisibleHeight = 160;
+
+    function updateMenuPlacement() {
+      if (!rootRef.current) {
+        return;
+      }
+
+      const rect = rootRef.current.getBoundingClientRect();
+      const viewportHeight = window.innerHeight;
+      const safeGap = 16;
+      const triggerGap = 8;
+      const availableBelow = Math.max(viewportHeight - rect.bottom - safeGap - triggerGap, 0);
+      const availableAbove = Math.max(rect.top - safeGap - triggerGap, 0);
+      const shouldOpenUp =
+        availableBelow < minimumVisibleHeight && availableAbove > availableBelow;
+      const availableSpace = shouldOpenUp ? availableAbove : availableBelow;
+
+      setOpenDirection(shouldOpenUp ? "up" : "down");
+      setMenuMaxHeight(Math.max(Math.min(availableSpace, preferredMenuHeight), minimumVisibleHeight));
     }
 
     function handlePointerDown(event: MouseEvent) {
@@ -53,12 +77,17 @@ export default function CompactComboBox({
       }
     }
 
+    updateMenuPlacement();
     window.addEventListener("mousedown", handlePointerDown);
     window.addEventListener("keydown", handleEscape);
+    window.addEventListener("resize", updateMenuPlacement);
+    window.addEventListener("scroll", updateMenuPlacement, true);
 
     return () => {
       window.removeEventListener("mousedown", handlePointerDown);
       window.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("resize", updateMenuPlacement);
+      window.removeEventListener("scroll", updateMenuPlacement, true);
     };
   }, [open]);
 
@@ -86,8 +115,13 @@ export default function CompactComboBox({
       </button>
 
       {open ? (
-        <div className="absolute left-0 right-0 top-[calc(100%+0.45rem)] z-50 overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_24px_60px_-24px_rgba(15,23,42,0.35)]">
-          <div className="max-h-64 overflow-y-auto py-1">
+        <div
+          className={cn(
+            "absolute left-0 right-0 z-50 overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_24px_60px_-24px_rgba(15,23,42,0.35)]",
+            openDirection === "up" ? "bottom-[calc(100%+0.45rem)]" : "top-[calc(100%+0.45rem)]",
+          )}
+        >
+          <div className="overflow-y-auto py-1" style={{ maxHeight: `${menuMaxHeight}px` }}>
             {options.map((option) => {
               const selected = option.value === value;
               return (

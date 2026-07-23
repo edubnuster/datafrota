@@ -33,14 +33,14 @@ MOD_NOREPEAT = 0x4000
 VK_F9 = 0x78
 HOTKEY_ID = 1
 HOTKEY_LABEL = "F9"
-DEBUG_SESSION_ENV = ".dbg/cashier-preauth-stuck.env"
+DEBUG_SESSION_ENV = ".dbg/pdv-snapshot-sync.env"
 SINGLE_INSTANCE_MUTEX = "Global\\IntegracaoFrotaSingleInstance"
 SHOW_WINDOW_EVENT = "Global\\IntegracaoFrotaShowWindow"
 EVENT_MODIFY_STATE = 0x0002
 SYNCHRONIZE = 0x00100000
 WAIT_OBJECT_0 = 0x00000000
 CONTEXT_REFRESH_TTL_SECONDS = 15.0
-PROMOTION_SYNC_INTERVAL_MS = 60000
+PROMOTION_SYNC_INTERVAL_MS = 5000
 APP_INSTALL_DIR = Path(__file__).resolve().parent
 DEFAULT_APP_DATA_DIR = Path(os.getenv("PROGRAMDATA") or r"C:\ProgramData") / "Datafrota"
 APP_DATA_DIR = Path(os.getenv("FROTA_APP_DATA_DIR") or DEFAULT_APP_DATA_DIR)
@@ -342,18 +342,20 @@ def load_promotion_cache() -> dict:
         with open(PROMOTION_CACHE_FILE, encoding="utf-8") as cache_file:
             payload = json.load(cache_file)
     except (OSError, json.JSONDecodeError):
-        return {"items": [], "serverTime": None}
+        return {"items": [], "serverTime": None, "promotionCursor": None}
 
     items = payload.get("items") if isinstance(payload.get("items"), list) else []
     return {
         "items": [item for item in items if isinstance(item, dict)],
         "serverTime": payload.get("serverTime") if isinstance(payload.get("serverTime"), str) else None,
+        "promotionCursor": payload.get("promotionCursor") if isinstance(payload.get("promotionCursor"), int) else None,
     }
 
 
-def save_promotion_cache(items: list[dict], server_time: str | None) -> None:
+def save_promotion_cache(items: list[dict], server_time: str | None, promotion_cursor: int | None) -> None:
     payload = {
         "serverTime": server_time,
+        "promotionCursor": promotion_cursor,
         "savedAt": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "items": items,
     }
@@ -782,8 +784,24 @@ class FrotaApiClient:
     def bootstrap(self) -> dict:
         return self._request("POST", f"{self.base_url}/cashier-discounts/bootstrap", {})
 
-    def sync_promotions(self) -> dict:
-        return self._request("GET", f"{self.base_url}/pdv-agents/me/sync")
+    def sync_promotions(self, cursor: int | None = None) -> dict:
+        query = ""
+        if isinstance(cursor, int) and cursor > 0:
+            query = "?" + parse.urlencode({"cursor": str(cursor)})
+        # #region debug-point A:api-sync-promotions
+        debug_report_cashier(
+            "A",
+            "integracao_frota_app.py:787",
+            "[DEBUG] API PDV sync_promotions chamado",
+            {
+                "baseUrl": self.base_url,
+                "hasCursor": isinstance(cursor, int) and cursor > 0,
+                "cursor": cursor,
+                "hasAgentCredentials": self.has_agent_credentials(),
+            },
+        )
+        # #endregion
+        return self._request("GET", f"{self.base_url}/pdv-agents/me/sync{query}")
 
     def has_agent_credentials(self) -> bool:
         return bool(self.agent_credentials.get("apiToken"))
@@ -967,6 +985,7 @@ class IntegracaoFrotaApp:
         self.promotion_sync_in_flight = False
         self.synced_promotions: list[dict] = []
         self.last_promotion_sync_at: str | None = None
+        self.promotion_cursor: int | None = None
         self.ui_dispatch_queue = queue.SimpleQueue()
         self.ui_dispatch_job = None
         self.current_operation = "idle"
@@ -1939,6 +1958,7 @@ class IntegracaoFrotaApp:
         cached = load_promotion_cache()
         self.synced_promotions = cached.get("items", [])
         self.last_promotion_sync_at = cached.get("serverTime")
+        self.promotion_cursor = cached.get("promotionCursor")
         self._refresh_promotion_sync_summary()
 
     def _refresh_promotion_sync_summary(self, custom_message: str | None = None) -> None:
@@ -1992,6 +2012,19 @@ class IntegracaoFrotaApp:
 
     def _sync_promotions(self) -> None:
         self.promotion_sync_job = None
+        # #region debug-point A:ui-sync-promotions-entry
+        debug_report_cashier(
+            "A",
+            "integracao_frota_app.py:2000",
+            "[DEBUG] Entrada no scheduler de sync de promocoes do PDV",
+            {
+                "agentReady": self.agent_ready,
+                "integrationReady": self.integration_ready,
+                "inFlight": self.promotion_sync_in_flight,
+                "cursor": self.promotion_cursor,
+            },
+        )
+        # #endregion
         if not self.agent_ready or not self.integration_ready or self.promotion_sync_in_flight:
             return
 
@@ -1999,10 +2032,34 @@ class IntegracaoFrotaApp:
 
         def runner() -> None:
             try:
-                response = self.api.sync_promotions()
+                response = self.api.sync_promotions(self.promotion_cursor)
+                # #region debug-point B:ui-sync-promotions-success
+                debug_report_cashier(
+                    "B",
+                    "integracao_frota_app.py:2009",
+                    "[DEBUG] Sync de promocoes retornou do backend",
+                    {
+                        "success": response.get("success"),
+                        "promotionCursor": response.get("promotionCursor"),
+                        "unchanged": response.get("unchanged"),
+                        "itemCount": response.get("itemCount"),
+                    },
+                )
+                # #endregion
                 if not response.get("success"):
                     raise RuntimeError(response.get("error") or "Nao foi possivel sincronizar as promocoes do PDV.")
             except Exception as exc:  # noqa: BLE001
+                # #region debug-point E:ui-sync-promotions-error
+                debug_report_cashier(
+                    "E",
+                    "integracao_frota_app.py:2012",
+                    "[DEBUG] Sync de promocoes falhou no app-py",
+                    {
+                        "message": str(exc),
+                        "cursor": self.promotion_cursor,
+                    },
+                )
+                # #endregion
                 message = str(exc)
                 self._dispatch_on_ui_thread(lambda message=message: self._apply_promotion_sync_error(message))
                 return
@@ -2013,10 +2070,13 @@ class IntegracaoFrotaApp:
 
     def _apply_promotion_sync(self, response: dict) -> None:
         self.promotion_sync_in_flight = False
-        items = response.get("items") if isinstance(response.get("items"), list) else []
-        self.synced_promotions = [item for item in items if isinstance(item, dict)]
         self.last_promotion_sync_at = response.get("serverTime") if isinstance(response.get("serverTime"), str) else None
-        save_promotion_cache(self.synced_promotions, self.last_promotion_sync_at)
+        cursor = response.get("promotionCursor")
+        self.promotion_cursor = cursor if isinstance(cursor, int) else self.promotion_cursor
+        if not response.get("unchanged"):
+            items = response.get("items") if isinstance(response.get("items"), list) else []
+            self.synced_promotions = [item for item in items if isinstance(item, dict)]
+        save_promotion_cache(self.synced_promotions, self.last_promotion_sync_at, self.promotion_cursor)
         self._refresh_promotion_sync_summary()
         self._schedule_promotion_sync()
 
@@ -2337,6 +2397,14 @@ class IntegracaoFrotaApp:
             f"Escopo: {self._build_scope_summary(authorization)}",
             f"Status: {self._build_status_summary(authorization)}",
         ]
+        promotion_name = str(authorization.get("promotionName") or "").strip()
+        if promotion_name:
+            lines.append(f"Promocao: {promotion_name}")
+        if authorization.get("requireCustomerDocumentAtCashier"):
+            document_type = str(authorization.get("issuedDocumentType") or "documento").upper()
+            document_hint = str(authorization.get("issuedDocumentHint") or "").strip()
+            suffix = f" ({document_hint})" if document_hint else ""
+            lines.append(f"Validacao no caixa: exigir {document_type}{suffix}")
         return "\n".join(lines)
 
     def _build_scope_summary(self, authorization: dict) -> str:
@@ -2454,6 +2522,12 @@ class IntegracaoFrotaApp:
         if authorization.get("reusable"):
             lines.append("Reutilizavel: Sim")
 
+        if authorization.get("requireCustomerDocumentAtCashier"):
+            document_type = str(authorization.get("issuedDocumentType") or "documento").upper()
+            document_hint = str(authorization.get("issuedDocumentHint") or "").strip()
+            suffix = f" ({document_hint})" if document_hint else ""
+            lines.append(f"Confirmacao no caixa: {document_type}{suffix}")
+
         if not lines:
             return "Cupom aprovado sem restricoes adicionais."
 
@@ -2531,12 +2605,34 @@ class IntegracaoFrotaApp:
 
         resolved_estacao = self.cashier_context.get("estacao") if self.cashier_context else None
         resolved_conta = self.cashier_context.get("conta") if self.cashier_context else None
+        authorization = self.validated_voucher.get("authorization", {}) if isinstance(self.validated_voucher, dict) else {}
+        document_number = None
+        if authorization.get("requireCustomerDocumentAtCashier"):
+            document_type = str(authorization.get("issuedDocumentType") or "CPF/CNPJ").upper()
+            document_hint = str(authorization.get("issuedDocumentHint") or "").strip()
+            prompt = f"Informe o {document_type} do cliente"
+            if document_hint:
+                prompt += f" ({document_hint})"
+            prompt += ":"
+            document_number = (
+                simpledialog.askstring(
+                    "validação do voucher",
+                    prompt,
+                    parent=self.root,
+                )
+                or ""
+            ).strip()
+            if not document_number:
+                self.status_var.set(f"Informe o {document_type} para autorizar este voucher.")
+                self._set_validation_feedback(f"{document_type} obrigatorio", "error")
+                return
 
         payload = {
             "shortCode": self.validated_voucher["shortCode"],
             "stationHint": self.api.station_hint or None,
             "estacao": resolved_estacao or None,
             "conta": resolved_conta or None,
+            "documentNumber": document_number or None,
         }
 
         self.status_var.set("Registrando pre-autorizacao para o proximo item elegivel deste caixa...")

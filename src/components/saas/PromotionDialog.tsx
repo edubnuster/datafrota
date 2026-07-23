@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import ModernDateInput from "@/components/ModernDateInput";
 import { useReferenceData } from "@/hooks/useReferenceData";
-import type { CreatePromotionInput, PromotionStatus, PromotionWeekday } from "@/types/saas";
+import type { CreatePromotionInput, PromotionStatus, PromotionVoucherMode, PromotionWeekday } from "@/types/saas";
 import CompactComboBox from "./CompactComboBox";
 
 type WizardStep = 0 | 1 | 2 | 3 | 4 | 5 | 6;
@@ -49,10 +49,12 @@ const defaultActiveWeekdays: PromotionWeekday[] = ["dom", "seg", "ter", "qua", "
 
 const initialForm: PromotionPayload = {
   name: "",
+  voucherMode: "mobile",
   voucherCode: "",
+  requireCustomerDocumentAtCashier: false,
   description: "",
-  discountType: "fixed",
-  discountValue: "0,15",
+  discountType: "percent",
+  discountValue: "15",
   productMode: "individual",
   selectedProductCodes: [],
   selectedProductGroupCodes: [],
@@ -506,8 +508,9 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
         ? {
             ...initialValue,
             couponValidityMinutes: initialValue.couponValidityMinutes?.trim() || "15",
+            requireCustomerDocumentAtCashier: Boolean(initialValue.requireCustomerDocumentAtCashier),
           }
-        : { ...initialForm, voucherCode: createVoucherCode() },
+        : { ...initialForm },
     );
     setError(null);
   }, [initialValue, open]);
@@ -748,7 +751,7 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
       if (!form.name.trim()) {
         return "Informe o nome da campanha.";
       }
-      if (!form.voucherCode.trim()) {
+      if (form.voucherMode === "fixed" && !form.voucherCode.trim()) {
         return "Informe ou gere o codigo do voucher.";
       }
       if (!form.discountValue.trim()) {
@@ -889,6 +892,10 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
           : `${customerCount} cliente(s)`;
   const branchScopeLabel = branchCount === 0 ? "0 filial" : `${branchCount} filial(is)`;
   const paymentScopeLabel = form.paymentMode === "all" ? "Todas as formas" : `${form.selectedPaymentFormCodes.length} forma(s)`;
+  const voucherModeSummaryLabel =
+    form.voucherMode === "fixed"
+      ? `Voucher fixo · ${form.voucherCode || "Nao gerado"}`
+      : "Voucher sob demanda no app do cliente";
   const availablePromotionStatusOptions = isEditing
     ? promotionStatusOptions.filter((option) => option.value !== "agendada" && option.value !== "encerrada")
     : promotionStatusOptions;
@@ -947,24 +954,58 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                 />
               </Field>
 
-              <Field label="Código do voucher" description="Codigo que aparece no app do cliente para usar no caixa.">
-                <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-                  <input
-                    className="saas-input rounded-[18px] border-slate-200 bg-white"
-                    placeholder="Ex: GAS10"
-                    value={form.voucherCode}
-                    onChange={(event) => updateField("voucherCode", event.target.value.toUpperCase())}
+              <Field
+                label="Emissão do voucher"
+                description="Por padrão o código nasce no app mobile quando o cliente tocar em gerar voucher dentro da promoção."
+              >
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <ChoiceCard
+                    title="Gerado no app"
+                    description="Cada cliente emite seu próprio voucher no celular ao tocar no card da campanha."
+                    active={form.voucherMode === "mobile"}
+                    icon={<Globe className="h-6 w-6" />}
+                    compact
+                    onClick={() => {
+                      updateField("voucherMode", "mobile" as PromotionVoucherMode);
+                      updateField("voucherCode", "");
+                    }}
                   />
-                  <button
-                    type="button"
-                    onClick={() => updateField("voucherCode", createVoucherCode())}
-                    className="inline-flex items-center justify-center gap-2 rounded-[18px] border border-slate-200 bg-white px-5 py-3 font-semibold text-slate-700 transition hover:border-violet-200 hover:text-violet-700"
-                  >
-                    <WandSparkles className="h-4 w-4" />
-                    Gerar
-                  </button>
+                  <ChoiceCard
+                    title="Voucher fixo"
+                    description="Usa o mesmo código para todos os clientes, ideal para folder, e-mail e mídia impressa."
+                    active={form.voucherMode === "fixed"}
+                    icon={<WandSparkles className="h-6 w-6" />}
+                    compact
+                    onClick={() => {
+                      updateField("voucherMode", "fixed" as PromotionVoucherMode);
+                      if (!form.voucherCode.trim()) {
+                        updateField("voucherCode", createVoucherCode());
+                      }
+                    }}
+                  />
                 </div>
               </Field>
+
+              {form.voucherMode === "fixed" ? (
+                <Field label="Codigo do voucher fixo" description="Mesmo codigo exibido no web, no app e usado no caixa.">
+                  <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                    <input
+                      className="saas-input rounded-[18px] border-slate-200 bg-white"
+                      placeholder="Ex: GAS10"
+                      value={form.voucherCode}
+                      onChange={(event) => updateField("voucherCode", event.target.value.toUpperCase())}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => updateField("voucherCode", createVoucherCode())}
+                      className="inline-flex items-center justify-center gap-2 rounded-[18px] border border-slate-200 bg-white px-5 py-3 font-semibold text-slate-700 transition hover:border-violet-200 hover:text-violet-700"
+                    >
+                      <WandSparkles className="h-4 w-4" />
+                      Gerar
+                    </button>
+                  </div>
+                </Field>
+              ) : null}
 
               <Field label="Descrição (opcional)">
                 <textarea
@@ -986,7 +1027,7 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                 <Field label="Valor do desconto">
                   <input
                     className="saas-input rounded-[18px] border-slate-200 bg-white"
-                    placeholder="0,15"
+                    placeholder={form.discountType === "fixed" ? "0,15" : "15"}
                     value={form.discountValue}
                     onChange={(event) => updateField("discountValue", event.target.value)}
                   />
@@ -1399,6 +1440,35 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                 </div>
               </div>
 
+              <div className="rounded-[24px] border border-sky-100 bg-sky-50/60 px-5 py-5">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="font-semibold text-slate-900">Exigir CPF/CNPJ no caixa</p>
+                    <p className="text-sm text-slate-500">
+                      Opcional. Quando ativo, o PDV pede o documento do cliente antes de autorizar o voucher desta promoção.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateField("requireCustomerDocumentAtCashier", !form.requireCustomerDocumentAtCashier)
+                    }
+                    className={[
+                      "relative inline-flex h-7 w-12 rounded-full transition",
+                      form.requireCustomerDocumentAtCashier ? "bg-violet-600" : "bg-slate-200",
+                    ].join(" ")}
+                    aria-pressed={form.requireCustomerDocumentAtCashier}
+                  >
+                    <span
+                      className={[
+                        "absolute top-1 h-5 w-5 rounded-full bg-white shadow transition",
+                        form.requireCustomerDocumentAtCashier ? "left-6" : "left-1",
+                      ].join(" ")}
+                    />
+                  </button>
+                </div>
+              </div>
+
               <div className="rounded-[24px] border border-amber-100 bg-amber-50/50 p-5">
                 <div>
                   <p className="text-base font-semibold text-amber-900">Limites de segurança</p>
@@ -1521,7 +1591,7 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                     <div className="grid gap-2 rounded-[22px] border border-white/80 bg-white/85 px-4 py-3 text-sm text-slate-600 shadow-sm sm:grid-cols-2 xl:min-w-[18rem]">
                       <div>
                         <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Voucher</p>
-                        <p className="mt-1 font-semibold text-slate-900">{form.voucherCode || "Não gerado"}</p>
+                        <p className="mt-1 font-semibold text-slate-900">{voucherModeSummaryLabel}</p>
                       </div>
                       <div>
                         <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Desconto</p>
@@ -1557,8 +1627,12 @@ export default function PromotionDialog({ open, initialValue, submitError, onClo
                     icon={<BadgePercent className="h-5 w-5" />}
                   >
                     <SummaryRow label="Campanha" value={form.name || "Não informado"} emphasize />
-                    <SummaryRow label="Voucher" value={form.voucherCode || "Não gerado"} />
+                    <SummaryRow label="Voucher" value={voucherModeSummaryLabel} />
                     <SummaryRow label="Desconto" value={discountSummaryLabel} emphasize />
+                    <SummaryRow
+                      label="CPF/CNPJ no caixa"
+                      value={form.requireCustomerDocumentAtCashier ? "Opcional ativo" : "Inativo por padrão"}
+                    />
                     <SummaryRow label="Descrição" value={form.description.trim() || "Sem descrição"} />
                   </SummarySection>
 

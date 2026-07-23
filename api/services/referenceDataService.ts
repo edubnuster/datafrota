@@ -1,5 +1,6 @@
 import { ensureCompaniesSchema, query, querySaas } from "../db.js";
 import type { ReferenceDataType, ReferenceOption } from "../../shared/referenceData.js";
+import { listTenantReferenceData } from "./referenceSyncService.js";
 
 function normalizeTerm(term: string): string {
   return term.trim();
@@ -40,7 +41,13 @@ function filterReferenceOptions(
         return true;
       }
 
-      return item.code.toLowerCase().includes(normalizedTerm) || item.name.toLowerCase().includes(normalizedTerm);
+      return (
+        item.code.toLowerCase().includes(normalizedTerm) ||
+        item.name.toLowerCase().includes(normalizedTerm) ||
+        String(item.value ?? "")
+          .toLowerCase()
+          .includes(normalizedTerm)
+      );
     })
     .sort((left, right) => {
       const selectedDelta = Number(selectedSet.has(right.code)) - Number(selectedSet.has(left.code));
@@ -58,93 +65,26 @@ function filterReferenceOptions(
     .slice(0, limit + selectedSet.size);
 }
 
-export async function listReferenceData(
-  type: ReferenceDataType,
-  search = "",
-  selectedCodes: string[] = [],
-  options?: {
-    allowedBranchIds?: string[] | null;
-    companyId?: string | null;
-  },
+async function hasPublishedReferenceSnapshot(companyId: string): Promise<boolean> {
+  const result = await querySaas<{ published_version: number }>(
+    `
+      SELECT published_version
+      FROM tenant_reference_snapshot_state
+      WHERE company_id = $1
+      LIMIT 1
+    `,
+    [companyId],
+  );
+
+  return Number(result.rows[0]?.published_version ?? 0) > 0;
+}
+
+async function listLegacyReferenceData(
+  type: Exclude<ReferenceDataType, "branches">,
+  term: string,
+  normalizedSelectedCodes: string[],
+  hasSearch: boolean,
 ): Promise<ReferenceOption[]> {
-  const term = normalizeTerm(search);
-  const hasSearch = term.length > 0;
-  const normalizedSelectedCodes = Array.from(new Set(selectedCodes.map((code) => code.trim()).filter(Boolean)));
-  const allowedBranchIds = Array.from(new Set((options?.allowedBranchIds ?? []).map((code) => code.trim()).filter(Boolean)));
-
-  if (type === "branches") {
-    if (options?.companyId) {
-      await ensureCompaniesSchema();
-      const result = await querySaas<{ code: string; name: string; value: string }>(
-        `
-          SELECT
-            branch_code AS code,
-            branch_name AS name,
-            branch_id AS value
-          FROM saas_company_branch
-          WHERE company_id = $1
-            AND is_active = TRUE
-            AND (
-              $2 = ''
-              OR branch_code ILIKE '%' || $2 || '%'
-              OR branch_id ILIKE '%' || $2 || '%'
-              OR branch_name ILIKE '%' || $2 || '%'
-              OR branch_id = ANY($4::text[])
-            )
-            AND (
-              COALESCE(array_length($3::text[], 1), 0) = 0
-              OR branch_id = ANY($3::text[])
-            )
-          ORDER BY branch_name ASC, branch_id ASC
-          LIMIT ($5 + COALESCE(array_length($4::text[], 1), 0))
-        `,
-        [
-          options.companyId,
-          term,
-          allowedBranchIds,
-          normalizedSelectedCodes,
-          hasSearch ? 50 : 100,
-        ],
-      );
-
-      return result.rows.map((row) => ({
-        code: row.code,
-        name: row.name,
-        value: row.value,
-      }));
-    }
-
-    if (options?.allowedBranchIds && allowedBranchIds.length === 0) {
-      return [];
-    }
-
-    const result = await query<{ code: string | number; nameHex: string | null; value: string | number }>(
-      `
-        SELECT DISTINCT ON (CAST(grid AS TEXT))
-          codigo AS code,
-          ENCODE(CONVERT_TO(nome, 'LATIN1'), 'hex') AS "nameHex",
-          CAST(grid AS TEXT) AS value
-        FROM empresa
-        WHERE flag = 'A'
-          AND (
-            COALESCE(array_length($3::text[], 1), 0) = 0
-            OR CAST(grid AS TEXT) = ANY($3::text[])
-          )
-          AND (
-            $1 = ''
-            OR CAST(codigo AS TEXT) ILIKE '%' || $1 || '%'
-            OR CAST(grid AS TEXT) ILIKE '%' || $1 || '%'
-            OR nome ILIKE '%' || $1 || '%'
-          )
-        ORDER BY CAST(grid AS TEXT), nome ASC
-        LIMIT $2
-      `,
-      [term, hasSearch ? 50 : 100, allowedBranchIds],
-    );
-
-    return mapRows(result.rows);
-  }
-
   if (type === "products") {
     const result = await query<{ code: string; nameHex: string; value: string }>(
       `
@@ -183,7 +123,6 @@ export async function listReferenceData(
         WHERE p.flag = 'A'
         ORDER BY gp.codigo ASC
       `,
-      [],
     );
 
     const items: ReferenceOption[] = [];
@@ -211,7 +150,7 @@ export async function listReferenceData(
           name,
         });
       } catch {
-        // Ignore legacy rows with invalid encoding instead of aborting the full list.
+        // Ignora linhas legadas com encoding invalido sem quebrar a tela.
       }
     }
 
@@ -289,4 +228,76 @@ export async function listReferenceData(
   );
 
   return mapRows(result.rows);
+}
+
+export async function listReferenceData(
+  type: ReferenceDataType,
+  search = "",
+  selectedCodes: string[] = [],
+  options?: {
+    allowedBranchIds?: string[] | null;
+    companyId?: string | null;
+  },
+): Promise<ReferenceOption[]> {
+  const term = normalizeTerm(search);
+  const normalizedSelectedCodes = Array.from(new Set(selectedCodes.map((code) => code.trim()).filter(Boolean)));
+  const hasSearch = term.length > 0;
+  const allowedBranchIds = Array.from(new Set((options?.allowedBranchIds ?? []).map((code) => code.trim()).filter(Boolean)));
+
+  if (type === "branches") {
+    if (options?.companyId) {
+      await ensureCompaniesSchema();
+      const result = await querySaas<{ code: string; name: string; value: string }>(
+        `
+          SELECT
+            branch_code AS code,
+            branch_name AS name,
+            branch_id AS value
+          FROM saas_company_branch
+          WHERE company_id = $1
+            AND is_active = TRUE
+            AND (
+              $2 = ''
+              OR branch_code ILIKE '%' || $2 || '%'
+              OR branch_id ILIKE '%' || $2 || '%'
+              OR branch_name ILIKE '%' || $2 || '%'
+              OR branch_id = ANY($4::text[])
+            )
+            AND (
+              COALESCE(array_length($3::text[], 1), 0) = 0
+              OR branch_id = ANY($3::text[])
+            )
+          ORDER BY branch_name ASC, branch_id ASC
+          LIMIT ($5 + COALESCE(array_length($4::text[], 1), 0))
+        `,
+        [
+          options.companyId,
+          term,
+          allowedBranchIds,
+          normalizedSelectedCodes,
+          hasSearch ? 50 : 100,
+        ],
+      );
+
+      return result.rows.map((row) => ({
+        code: row.code,
+        name: row.name,
+        value: row.value,
+      }));
+    }
+
+    return [];
+  }
+
+  if (!options?.companyId) {
+    return [];
+  }
+
+  void allowedBranchIds;
+
+  if (!(await hasPublishedReferenceSnapshot(options.companyId))) {
+    return listLegacyReferenceData(type, term, normalizedSelectedCodes, hasSearch);
+  }
+
+  return listTenantReferenceData(options.companyId, type, term, normalizedSelectedCodes);
 }

@@ -60,6 +60,7 @@ export interface PromotionDashboardBranchStat {
 export interface PromotionDashboardVoucherStat {
   promotionId: string;
   name: string;
+  voucherMode: "mobile" | "fixed";
   voucherCode: string;
   status: PromotionStatus;
   discountType: PromotionDiscountType;

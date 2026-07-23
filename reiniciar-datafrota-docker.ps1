@@ -19,7 +19,7 @@ $composeProjectName = "datafrota"
 $composeFilePath = Join-Path $projectRoot "docker-compose.yml"
 $backendTimeoutSeconds = 60
 $frontendTimeoutSeconds = 120
-$composeUpTimeoutSeconds = 180
+$composeUpTimeoutSeconds = 420
 
 if (-not (Test-Path $projectRoot)) {
   throw "Diretorio do SaaS web nao encontrado: $projectRoot"

@@ -146,6 +146,7 @@ export default function Promotions() {
       [
         promotion.name,
         promotion.voucherCode,
+        promotion.voucherMode === "fixed" ? "voucher fixo" : "voucher mobile",
         ...Object.values(formatPromotionForDisplay(promotion)),
       ]
         .join(" ")
@@ -324,6 +325,18 @@ export default function Promotions() {
           {filteredPromotions.map((promotion) => {
             const canActivate = promotion.status !== "ativa";
             const display = formatPromotionForDisplay(promotion);
+            const integrationStateLabel =
+              promotion.voucherMode === "fixed"
+                ? integrationLabels[promotion.integration?.state ?? "pending"]
+                : "Gerado no mobile";
+            const integrationStateStyle =
+              promotion.voucherMode === "fixed"
+                ? integrationBadgeStyles[promotion.integration?.state ?? "pending"]
+                : "bg-violet-50 text-violet-700";
+            const voucherLabel =
+              promotion.voucherMode === "fixed"
+                ? `Voucher fixo ${promotion.voucherCode || "Nao definido"}`
+                : "Voucher gerado no app do cliente";
 
             return (
               <article
@@ -341,23 +354,23 @@ export default function Promotions() {
                         {statusLabels[promotion.status]}
                       </span>
                       <span
-                        className={`rounded-full px-3 py-1 text-xs font-medium ${
-                          integrationBadgeStyles[promotion.integration?.state ?? "pending"]
-                        }`}
+                        className={`rounded-full px-3 py-1 text-xs font-medium ${integrationStateStyle}`}
                       >
-                        {integrationLabels[promotion.integration?.state ?? "pending"]}
+                        {integrationStateLabel}
                       </span>
                     </div>
                     <p className="text-sm text-slate-500">
                       {display.discountSummary} · {display.targetSummary} · {display.audienceSummary}
                     </p>
-                    <p className="text-sm text-slate-400">Voucher {promotion.voucherCode}</p>
+                    <p className="text-sm text-slate-400">{voucherLabel}</p>
                     <p className="text-xs text-slate-400">
-                      {promotion.integration?.syncedAt
+                      {promotion.voucherMode === "fixed" && promotion.integration?.syncedAt
                         ? `Ultima publicacao PDV: ${new Date(promotion.integration.syncedAt).toLocaleString("pt-BR")}`
-                        : "Aguardando primeira publicacao para o PDV"}
+                        : promotion.voucherMode === "fixed"
+                          ? "Aguardando primeira publicacao para o PDV"
+                          : "O codigo sera criado no app quando a campanha sincronizar com o cliente"}
                     </p>
-                    {promotion.integration?.error ? (
+                    {promotion.voucherMode === "fixed" && promotion.integration?.error ? (
                       <p className="text-xs text-rose-600">{promotion.integration.error}</p>
                     ) : null}
                   </div>

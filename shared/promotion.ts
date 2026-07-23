@@ -1,5 +1,6 @@
 export const PROMOTION_STATUS_VALUES = ["ativa", "agendada", "pausada", "encerrada"] as const;
 export const PROMOTION_DISCOUNT_TYPE_VALUES = ["fixed", "percent"] as const;
+export const PROMOTION_VOUCHER_MODE_VALUES = ["mobile", "fixed"] as const;
 export const PROMOTION_PRODUCT_MODE_VALUES = ["group", "individual"] as const;
 export const PROMOTION_AUDIENCE_MODE_VALUES = ["all", "group", "individual", "firstPurchase"] as const;
 export const PROMOTION_PAYMENT_MODE_VALUES = ["all", "selected"] as const;
@@ -8,6 +9,7 @@ export const PROMOTION_PDV_SYNC_STATE_VALUES = ["pending", "published", "cancell
 
 export type PromotionStatus = (typeof PROMOTION_STATUS_VALUES)[number];
 export type PromotionDiscountType = (typeof PROMOTION_DISCOUNT_TYPE_VALUES)[number];
+export type PromotionVoucherMode = (typeof PROMOTION_VOUCHER_MODE_VALUES)[number];
 export type PromotionProductMode = (typeof PROMOTION_PRODUCT_MODE_VALUES)[number];
 export type PromotionAudienceMode = (typeof PROMOTION_AUDIENCE_MODE_VALUES)[number];
 export type PromotionPaymentMode = (typeof PROMOTION_PAYMENT_MODE_VALUES)[number];
@@ -23,7 +25,9 @@ export interface PromotionPdvIntegration {
 
 export interface CreatePromotionInput {
   name: string;
+  voucherMode: PromotionVoucherMode;
   voucherCode: string;
+  requireCustomerDocumentAtCashier: boolean;
   description: string;
   discountType: PromotionDiscountType;
   discountValue: string;
@@ -92,7 +96,13 @@ export function normalizePromotionInput(input?: Partial<CreatePromotionInput> | 
   const status = PROMOTION_STATUS_VALUES.includes(input?.status as PromotionStatus) ? input!.status! : "ativa";
   const discountType = PROMOTION_DISCOUNT_TYPE_VALUES.includes(input?.discountType as PromotionDiscountType)
     ? input!.discountType!
-    : "fixed";
+    : "percent";
+  const rawVoucherCode = asText(input?.voucherCode).trim().toUpperCase();
+  const voucherMode = PROMOTION_VOUCHER_MODE_VALUES.includes(input?.voucherMode as PromotionVoucherMode)
+    ? input!.voucherMode!
+    : rawVoucherCode
+      ? "fixed"
+      : "mobile";
   const productMode = PROMOTION_PRODUCT_MODE_VALUES.includes(input?.productMode as PromotionProductMode)
     ? input!.productMode!
     : "individual";
@@ -105,7 +115,9 @@ export function normalizePromotionInput(input?: Partial<CreatePromotionInput> | 
 
   return {
     name: asText(input?.name).trim(),
-    voucherCode: asText(input?.voucherCode).trim().toUpperCase(),
+    voucherMode,
+    voucherCode: voucherMode === "fixed" ? rawVoucherCode : "",
+    requireCustomerDocumentAtCashier: Boolean(input?.requireCustomerDocumentAtCashier),
     description: asText(input?.description).trim(),
     discountType,
     discountValue: asText(input?.discountValue).trim(),
@@ -147,7 +159,7 @@ export function validatePromotionInput(input?: Partial<CreatePromotionInput> | n
     issues.push("Informe o nome da campanha.");
   }
 
-  if (!normalized.voucherCode) {
+  if (normalized.voucherMode === "fixed" && !normalized.voucherCode) {
     issues.push("Informe ou gere o codigo do voucher.");
   }
 

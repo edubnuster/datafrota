@@ -75,7 +75,8 @@ router.get("/me", async (req: Request, res: Response): Promise<void> => {
 router.get("/me/sync", async (req: Request, res: Response): Promise<void> => {
   try {
     const session = await requirePdvAgentSession(req);
-    const payload = await listPdvPromotionsForAgent(session);
+    const rawCursor = Number(String(req.query.cursor || "").trim());
+    const payload = await listPdvPromotionsForAgent(session, Number.isFinite(rawCursor) ? rawCursor : null);
     res.status(200).json({
       success: true,
       ...payload,

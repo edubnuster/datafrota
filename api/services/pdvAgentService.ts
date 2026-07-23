@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "crypto";
+import { readFileSync } from "fs";
 import type { Request } from "express";
 import type {
   ActivatePdvAgentInput,
@@ -11,10 +12,47 @@ import type { CreatePromotionInput } from "../../shared/promotion.js";
 import type { PdvPromotionItem, PdvPromotionSyncResponse } from "../../shared/pdvPromotion.js";
 import { ensurePdvAgentSchema, querySaas } from "../db.js";
 import { canonicalizeSyncedBranchIds, syncCompanyBranchesFromOperationalDb } from "./companyBranchSyncService.js";
+import { getDiscountCodeTenantScope, resolveDiscountCode } from "./discountCodeService.js";
 import { mapPromotionWithIntegration } from "./pdvPromotionService.js";
+import { getCompanyPromotionCursor, syncTenantReferenceSnapshot } from "./referenceSyncService.js";
 import { resolveSaasAccessContext } from "./saasAccessService.js";
 
 const DEFAULT_PAIRING_EXPIRATION_MINUTES = 60;
+
+// #region debug-point shared:pdv-snapshot-report
+function debugReportPdvSnapshot(
+  hypothesisId: string,
+  location: string,
+  msg: string,
+  data: Record<string, unknown> = {},
+  runId = "pre-fix",
+): void {
+  let debugServerUrl = "http://127.0.0.1:7777/event";
+  let debugSessionId = "pdv-snapshot-sync";
+
+  try {
+    const envFile = readFileSync(".dbg/pdv-snapshot-sync.env", "utf8");
+    debugServerUrl = envFile.match(/DEBUG_SERVER_URL=(.+)/)?.[1]?.trim() || debugServerUrl;
+    debugSessionId = envFile.match(/DEBUG_SESSION_ID=(.+)/)?.[1]?.trim() || debugSessionId;
+  } catch {
+    // Ignora indisponibilidade do servidor de debug.
+  }
+
+  void fetch(debugServerUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: debugSessionId,
+      runId,
+      hypothesisId,
+      location,
+      msg,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => undefined);
+}
+// #endregion
 
 type PdvAgentRow = {
   id: string;
@@ -53,7 +91,7 @@ type PdvAgentAuthRow = PdvAgentRow & {
 type PromotionWithSyncRow = {
   id: string;
   name: string;
-  voucher_code: string;
+  voucher_code: string | null;
   status: "ativa" | "agendada" | "pausada" | "encerrada";
   payload: CreatePromotionInput | string;
   created_at: string | Date;
@@ -674,9 +712,51 @@ function isPromotionVisibleForBranch(payload: CreatePromotionInput, branchId: st
   return payload.selectedBranchIds.includes(branchId);
 }
 
-export async function listPdvPromotionsForAgent(session: PdvAgentSession): Promise<PdvPromotionSyncResponse> {
+export async function listPdvPromotionsForAgent(
+  session: PdvAgentSession,
+  currentCursor?: number | null,
+): Promise<PdvPromotionSyncResponse> {
   await ensurePdvAgentSchema();
+  // #region debug-point B:list-pdv-promotions-entry
+  debugReportPdvSnapshot("B", "pdvAgentService.ts:681", "[DEBUG] Entrada em listPdvPromotionsForAgent", {
+    agentId: session.agentId,
+    companyId: session.companyId,
+    branchId: session.branchId,
+    currentCursor: currentCursor ?? null,
+  });
+  // #endregion
   const refreshedSession = await refreshAgentBranchDiscovery(session);
+  // #region debug-point B:list-pdv-promotions-session
+  debugReportPdvSnapshot("B", "pdvAgentService.ts:683", "[DEBUG] Sessao do agente apos refresh", {
+    agentId: refreshedSession.agentId,
+    companyId: refreshedSession.companyId,
+    branchId: refreshedSession.branchId,
+    stationCode: refreshedSession.stationCode,
+  });
+  // #endregion
+  await syncTenantReferenceSnapshot({
+    companyId: refreshedSession.companyId,
+    agentId: refreshedSession.agentId,
+  });
+  const promotionCursor = await getCompanyPromotionCursor(refreshedSession.companyId);
+  // #region debug-point B:list-pdv-promotions-after-sync
+  debugReportPdvSnapshot("B", "pdvAgentService.ts:688", "[DEBUG] Cursor de promocao lido apos sync do tenant", {
+    companyId: refreshedSession.companyId,
+    promotionCursor,
+    currentCursor: currentCursor ?? null,
+  });
+  // #endregion
+
+  if (currentCursor && currentCursor === promotionCursor) {
+    return {
+      serverTime: new Date().toISOString(),
+      promotionCursor,
+      unchanged: true,
+      itemCount: 0,
+      items: [],
+    };
+  }
+
   const result = await querySaas<PromotionWithSyncRow>(
     `
       SELECT
@@ -707,6 +787,7 @@ export async function listPdvPromotionsForAgent(session: PdvAgentSession): Promi
     .map((promotion) => ({
       promotionId: promotion.id,
       name: promotion.name,
+      voucherMode: promotion.voucherMode,
       voucherCode: promotion.voucherCode,
       status: promotion.status,
       description: promotion.description,
@@ -742,6 +823,7 @@ export async function listPdvPromotionsForAgent(session: PdvAgentSession): Promi
 
   return {
     serverTime: new Date().toISOString(),
+    promotionCursor,
     itemCount: items.length,
     items,
   };
@@ -774,16 +856,30 @@ export async function assertAgentVoucherAccess(session: PdvAgentSession, shortCo
   );
 
   const row = result.rows[0];
-  if (!row) {
+  if (row) {
+    if (row.company_id !== refreshedSession.companyId) {
+      throw new PdvAgentError("Este voucher nao pertence a empresa vinculada a este PDV.", 403);
+    }
+
+    const payload = typeof row.payload === "string" ? (JSON.parse(row.payload) as CreatePromotionInput) : row.payload;
+    if (!isPromotionVisibleForBranch(payload, refreshedSession.branchId)) {
+      throw new PdvAgentError("Este voucher nao esta liberado para a filial vinculada a este PDV.", 403);
+    }
+    return;
+  }
+
+  const tenantScope = await getDiscountCodeTenantScope(code);
+  if (!tenantScope) {
     throw new PdvAgentError("Voucher nao encontrado para a empresa deste PDV.", 404);
   }
 
-  if (row.company_id !== refreshedSession.companyId) {
+  if (tenantScope.companyId && tenantScope.companyId !== refreshedSession.companyId) {
     throw new PdvAgentError("Este voucher nao pertence a empresa vinculada a este PDV.", 403);
   }
 
-  const payload = typeof row.payload === "string" ? (JSON.parse(row.payload) as CreatePromotionInput) : row.payload;
-  if (!isPromotionVisibleForBranch(payload, refreshedSession.branchId)) {
+  const resolved = await resolveDiscountCode(code);
+  const branchIds = resolved.authorization?.selectedBranchIds ?? [];
+  if (branchIds.length > 0 && !branchIds.includes(refreshedSession.branchId)) {
     throw new PdvAgentError("Este voucher nao esta liberado para a filial vinculada a este PDV.", 403);
   }
 }

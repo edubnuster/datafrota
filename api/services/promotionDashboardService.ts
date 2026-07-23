@@ -318,6 +318,7 @@ function buildVoucherStat(
   return {
     promotionId: promotion.id,
     name: promotion.name,
+    voucherMode: promotion.voucherMode,
     voucherCode: promotion.voucherCode,
     status: promotion.status,
     discountType: promotion.discountType,

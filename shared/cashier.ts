@@ -4,7 +4,9 @@ export type CashierVoucherValidation = {
   reason?: "NOT_FOUND" | "EXPIRED" | "CANCELLED" | "INVALID_CONTEXT";
   authorization?: {
     id: string;
-    discountPercent: number;
+    discountType: "percent" | "fixed";
+    discountPercent: number | null;
+    discountValue: number | null;
     scope: "ALL_PRODUCTS" | "PRODUCT" | "PRODUCT_GROUP";
     productCodes: string[];
     productGroupCodes: string[];
@@ -27,6 +29,14 @@ export type CashierVoucherValidation = {
     reusable: boolean;
     validFrom: string | null;
     validUntil: string | null;
+    promotionId: string | null;
+    promotionName: string | null;
+    voucherOrigin: "manual" | "promotion_fixed" | "promotion_mobile";
+    issuedToCustomerCode: string | null;
+    issuedToCustomerGroupCode: string | null;
+    issuedDocumentType: "cpf" | "cnpj" | null;
+    issuedDocumentHint: string | null;
+    requireCustomerDocumentAtCashier: boolean;
     status: "ACTIVE" | "EXPIRED" | "CANCELLED";
   };
 };
@@ -47,6 +57,7 @@ export type CreateCashierAuthorizationInput = {
   estacao?: string | null;
   stationHint?: string | null;
   quantidade?: number | null;
+  documentNumber?: string | null;
   mensagemDoc?: string | null;
   mensagemPdv?: string | null;
 };
@@ -65,7 +76,8 @@ export type CashierPendingAuthorization = {
   firstPurchaseOnly: boolean;
   newCustomerDays: number | null;
   paymentFormCodes: string[];
-  discountPercent: number;
+  discountType: "percent" | "fixed";
+  discountPercent: number | null;
   discountValue: number | null;
   quantity: number | null;
   status: "P" | "R" | "A" | "C" | "X" | "E";

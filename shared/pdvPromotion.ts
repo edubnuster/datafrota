@@ -8,6 +8,7 @@ import type {
 export interface PdvPromotionItem {
   promotionId: string;
   name: string;
+  voucherMode: "mobile" | "fixed";
   voucherCode: string;
   status: PromotionStatus;
   description: string;
@@ -43,6 +44,8 @@ export interface PdvPromotionItem {
 
 export interface PdvPromotionSyncResponse {
   serverTime: string;
+  promotionCursor: number;
+  unchanged?: boolean;
   itemCount: number;
   items: PdvPromotionItem[];
 }

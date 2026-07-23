@@ -1,6 +1,7 @@
 import {
   buildDiscountScope,
   createShortCode,
+  DEFAULT_SHORT_CODE_LENGTH,
   getEffectiveStatus,
   normalizeCreateDiscountInput,
   type CreateDiscountCodeInput,
@@ -28,13 +29,13 @@ export class DiscountValidationError extends Error {
 
 async function generateUniqueShortCode(existingCodes: Set<string>): Promise<string> {
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    const candidate = createShortCode(8);
+    const candidate = createShortCode(DEFAULT_SHORT_CODE_LENGTH);
     if (!existingCodes.has(candidate)) {
       return candidate;
     }
   }
 
-  return createShortCode(10);
+  return createShortCode(8);
 }
 
 function withEffectiveStatus(item: DiscountAuthorization): DiscountAuthorization {
@@ -170,6 +171,14 @@ async function validateActiveReferences(input: CreateDiscountCodeInput): Promise
 
 type DiscountAuthorizationRow = {
   id: string;
+  promotion_id: string | null;
+  promotion_name: string | null;
+  voucher_origin: DiscountAuthorization["voucherOrigin"] | null;
+  issued_to_customer_code: string | null;
+  issued_to_customer_group_code: string | null;
+  issued_document_type: DiscountAuthorization["issuedDocumentType"] | null;
+  issued_document_number: string | null;
+  require_customer_document_at_cashier: boolean | null;
   short_code: string;
   scope: DiscountAuthorization["scope"];
   product_codes: string[] | null;
@@ -191,7 +200,9 @@ type DiscountAuthorizationRow = {
   max_purchases_per_week: string | number | null;
   max_purchases_per_month: string | number | null;
   reusable: boolean | null;
+  discount_type: "percent" | "fixed" | null;
   discount_percent: string | number;
+  discount_value: string | number | null;
   valid_from: string | null;
   valid_until: string | null;
   status: DiscountAuthorization["status"];
@@ -200,8 +211,19 @@ type DiscountAuthorizationRow = {
 };
 
 function mapRow(row: DiscountAuthorizationRow): DiscountAuthorization {
+  const discountType = row.discount_type === "fixed" ? "fixed" : "percent";
+
   return {
     id: row.id,
+    promotionId: row.promotion_id ?? null,
+    promotionName: row.promotion_name ?? null,
+    voucherOrigin: row.voucher_origin === "promotion_fixed" || row.voucher_origin === "promotion_mobile" ? row.voucher_origin : "manual",
+    issuedToCustomerCode: row.issued_to_customer_code ?? null,
+    issuedToCustomerGroupCode: row.issued_to_customer_group_code ?? null,
+    issuedDocumentType:
+      row.issued_document_type === "cnpj" ? "cnpj" : row.issued_document_type === "cpf" ? "cpf" : null,
+    issuedDocumentNumber: row.issued_document_number ?? null,
+    requireCustomerDocumentAtCashier: Boolean(row.require_customer_document_at_cashier),
     shortCode: row.short_code,
     scope: row.scope,
     productCodes: row.product_codes ?? [],
@@ -246,7 +268,12 @@ function mapRow(row: DiscountAuthorizationRow): DiscountAuthorization {
         ? null
         : Number(row.max_purchases_per_month),
     reusable: Boolean(row.reusable),
-    discountPercent: Number(row.discount_percent),
+    discountType,
+    discountPercent: discountType === "percent" ? Number(row.discount_percent) : null,
+    discountValue:
+      discountType === "fixed" && row.discount_value !== null && row.discount_value !== undefined
+        ? Number(row.discount_value)
+        : null,
     validFrom: row.valid_from ? new Date(row.valid_from).toISOString() : null,
     validUntil: row.valid_until ? new Date(row.valid_until).toISOString() : null,
     status: row.status,
@@ -531,6 +558,84 @@ async function getExistingAuthorizationIdentity(shortCode: string): Promise<Exis
   return result.rows[0] ?? null;
 }
 
+export async function findPromotionIssuedVoucher(params: {
+  companyId: string;
+  promotionId: string;
+  issuedToCustomerCode?: string | null;
+  issuedDocumentNumber?: string | null;
+}): Promise<DiscountAuthorization | null> {
+  const customerCode = params.issuedToCustomerCode?.trim().toUpperCase() || null;
+  const documentNumber = String(params.issuedDocumentNumber ?? "").replace(/\D/g, "") || null;
+  if (!customerCode && !documentNumber) {
+    return null;
+  }
+
+  await ensureDiscountSchema();
+  const result = await query<DiscountAuthorizationRow>(
+    `
+      SELECT
+        da.id,
+        da.promotion_id,
+        da.promotion_name,
+        COALESCE(da.voucher_origin, 'manual') AS voucher_origin,
+        da.issued_to_customer_code,
+        da.issued_to_customer_group_code,
+        da.issued_document_type,
+        da.issued_document_number,
+        COALESCE(da.require_customer_document_at_cashier, FALSE) AS require_customer_document_at_cashier,
+        da.short_code,
+        da.scope,
+        ${buildProductCodesSql("da")} AS product_codes,
+        ${buildLegacyCompatibleArraySql("da", "product_group_codes", "product_group_code")} AS product_group_codes,
+        ${buildCustomerCodesSql("da")} AS customer_codes,
+        ${buildLegacyCompatibleArraySql("da", "customer_group_codes", "customer_group_code")} AS customer_group_codes,
+        COALESCE(da.first_purchase_only, FALSE) AS first_purchase_only,
+        da.new_customer_days,
+        COALESCE(da.branch_ids, ARRAY[]::text[]) AS branch_ids,
+        ${buildPaymentFormCodesSql("da")} AS payment_form_codes,
+        COALESCE(da.active_weekdays, ARRAY[]::text[]) AS active_weekdays,
+        da.start_time,
+        da.end_time,
+        COALESCE(da.birthday_only, FALSE) AS birthday_only,
+        da.max_discount_per_day,
+        da.max_volume_per_day,
+        da.max_quantity_per_item,
+        da.redemptions_per_customer,
+        da.max_purchases_per_week,
+        da.max_purchases_per_month,
+        COALESCE(da.reusable, FALSE) AS reusable,
+        COALESCE(da.discount_type, 'percent') AS discount_type,
+        da.discount_percent,
+        da.discount_value,
+        da.valid_from,
+        da.valid_until,
+        da.status,
+        da.created_at,
+        da.cancelled_at
+      FROM discount_authorization da
+      WHERE da.company_id = $1
+        AND da.promotion_id = $2
+        AND da.voucher_origin = 'promotion_mobile'
+        AND (
+          ($3::text IS NOT NULL AND da.issued_to_customer_code = $3::text)
+          OR ($4::text IS NOT NULL AND da.issued_document_number = $4::text)
+        )
+      ORDER BY da.created_at DESC
+      LIMIT 5
+    `,
+    [params.companyId, params.promotionId, customerCode, documentNumber],
+  );
+
+  for (const row of result.rows) {
+    const authorization = withEffectiveStatus(mapRow(row));
+    if (authorization.status === "ACTIVE") {
+      return authorization;
+    }
+  }
+
+  return null;
+}
+
 async function buildOperationalAuthorization(
   shortCode: string,
   input: CreateDiscountCodeInput,
@@ -562,6 +667,14 @@ async function buildOperationalAuthorization(
     normalized,
     authorization: {
       id: existing?.id ?? createAuthorizationId(),
+      promotionId: normalized.promotionId ?? null,
+      promotionName: normalized.promotionName ?? null,
+      voucherOrigin: normalized.voucherOrigin ?? "manual",
+      issuedToCustomerCode: normalized.issuedToCustomerCode ?? null,
+      issuedToCustomerGroupCode: normalized.issuedToCustomerGroupCode ?? null,
+      issuedDocumentType: normalized.issuedDocumentType ?? null,
+      issuedDocumentNumber: normalized.issuedDocumentNumber ?? null,
+      requireCustomerDocumentAtCashier: Boolean(normalized.requireCustomerDocumentAtCashier),
       shortCode: normalizedCode,
       scope: buildDiscountScope(normalized),
       productCodes: resolvedProducts.displayCodes,
@@ -586,7 +699,9 @@ async function buildOperationalAuthorization(
       maxPurchasesPerWeek: normalized.maxPurchasesPerWeek ?? null,
       maxPurchasesPerMonth: normalized.maxPurchasesPerMonth ?? null,
       reusable: Boolean(normalized.reusable),
-      discountPercent: normalized.discountPercent,
+      discountType: normalized.discountType === "fixed" ? "fixed" : "percent",
+      discountPercent: normalized.discountType === "fixed" ? null : normalized.discountPercent ?? null,
+      discountValue: normalized.discountType === "fixed" ? normalized.discountValue ?? null : null,
       validFrom: normalized.validFrom ?? null,
       validUntil: normalized.validUntil ?? null,
       status: "ACTIVE",
@@ -607,6 +722,14 @@ async function persistOperationalAuthorization(
         id,
         company_id,
         source_branch_id,
+        promotion_id,
+        promotion_name,
+        voucher_origin,
+        issued_to_customer_code,
+        issued_to_customer_group_code,
+        issued_document_type,
+        issued_document_number,
+        require_customer_document_at_cashier,
         short_code,
         scope,
         product_codes,
@@ -633,7 +756,9 @@ async function persistOperationalAuthorization(
         max_purchases_per_week,
         max_purchases_per_month,
         reusable,
+        discount_type,
         discount_percent,
+        discount_value,
         valid_from,
         valid_until,
         status,
@@ -644,12 +769,21 @@ async function persistOperationalAuthorization(
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
         $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-        $31, $32, $33, $34, $35
+        $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
+        $41, $42, $43, $44, $45
       )
       ON CONFLICT (short_code) DO UPDATE
       SET
         company_id = EXCLUDED.company_id,
         source_branch_id = EXCLUDED.source_branch_id,
+        promotion_id = EXCLUDED.promotion_id,
+        promotion_name = EXCLUDED.promotion_name,
+        voucher_origin = EXCLUDED.voucher_origin,
+        issued_to_customer_code = EXCLUDED.issued_to_customer_code,
+        issued_to_customer_group_code = EXCLUDED.issued_to_customer_group_code,
+        issued_document_type = EXCLUDED.issued_document_type,
+        issued_document_number = EXCLUDED.issued_document_number,
+        require_customer_document_at_cashier = EXCLUDED.require_customer_document_at_cashier,
         scope = EXCLUDED.scope,
         product_codes = EXCLUDED.product_codes,
         product_code = EXCLUDED.product_code,
@@ -675,7 +809,9 @@ async function persistOperationalAuthorization(
         max_purchases_per_week = EXCLUDED.max_purchases_per_week,
         max_purchases_per_month = EXCLUDED.max_purchases_per_month,
         reusable = EXCLUDED.reusable,
+        discount_type = EXCLUDED.discount_type,
         discount_percent = EXCLUDED.discount_percent,
+        discount_value = EXCLUDED.discount_value,
         valid_from = EXCLUDED.valid_from,
         valid_until = EXCLUDED.valid_until,
         status = EXCLUDED.status,
@@ -685,6 +821,14 @@ async function persistOperationalAuthorization(
       authorization.id,
       tenantScope.companyId,
       tenantScope.sourceBranchId,
+      authorization.promotionId,
+      authorization.promotionName,
+      authorization.voucherOrigin,
+      authorization.issuedToCustomerCode,
+      authorization.issuedToCustomerGroupCode,
+      authorization.issuedDocumentType,
+      authorization.issuedDocumentNumber,
+      authorization.requireCustomerDocumentAtCashier,
       authorization.shortCode,
       authorization.scope,
       normalized.productCodes ?? [],
@@ -711,7 +855,9 @@ async function persistOperationalAuthorization(
       authorization.maxPurchasesPerWeek,
       authorization.maxPurchasesPerMonth,
       authorization.reusable,
-      authorization.discountPercent,
+      authorization.discountType,
+      authorization.discountPercent ?? 1,
+      authorization.discountValue,
       authorization.validFrom,
       authorization.validUntil,
       authorization.status,
@@ -728,6 +874,14 @@ export async function listDiscountCodes(): Promise<DiscountAuthorization[]> {
   const result = await query<DiscountAuthorizationRow>(`
     SELECT
       da.id,
+      da.promotion_id,
+      da.promotion_name,
+      COALESCE(da.voucher_origin, 'manual') AS voucher_origin,
+      da.issued_to_customer_code,
+      da.issued_to_customer_group_code,
+      da.issued_document_type,
+      da.issued_document_number,
+      COALESCE(da.require_customer_document_at_cashier, FALSE) AS require_customer_document_at_cashier,
       da.short_code,
       da.scope,
       ${buildProductCodesSql("da")} AS product_codes,
@@ -749,7 +903,9 @@ export async function listDiscountCodes(): Promise<DiscountAuthorization[]> {
       da.max_purchases_per_week,
       da.max_purchases_per_month,
       COALESCE(da.reusable, FALSE) AS reusable,
+      COALESCE(da.discount_type, 'percent') AS discount_type,
       da.discount_percent,
+      da.discount_value,
       da.valid_from,
       da.valid_until,
       da.status,
@@ -767,9 +923,10 @@ export async function listDiscountCodes(): Promise<DiscountAuthorization[]> {
 
 export async function createDiscountCode(
   input: CreateDiscountCodeInput,
+  tenantScope: DiscountCodeTenantScope = { companyId: null, sourceBranchId: null },
 ): Promise<DiscountAuthorization> {
   const shortCode = await generateUniqueShortCode(await getExistingCodes());
-  return upsertDiscountCode(shortCode, input);
+  return upsertDiscountCode(shortCode, input, tenantScope);
 }
 
 export async function upsertDiscountCode(
@@ -820,6 +977,14 @@ export async function resolveDiscountCode(shortCode: string): Promise<ResolveDis
     `
       SELECT
         da.id,
+        da.promotion_id,
+        da.promotion_name,
+        COALESCE(da.voucher_origin, 'manual') AS voucher_origin,
+        da.issued_to_customer_code,
+        da.issued_to_customer_group_code,
+        da.issued_document_type,
+        da.issued_document_number,
+        COALESCE(da.require_customer_document_at_cashier, FALSE) AS require_customer_document_at_cashier,
         da.short_code,
         da.scope,
         ${buildProductCodesSql("da")} AS product_codes,
@@ -841,7 +1006,9 @@ export async function resolveDiscountCode(shortCode: string): Promise<ResolveDis
         da.max_purchases_per_week,
         da.max_purchases_per_month,
         COALESCE(da.reusable, FALSE) AS reusable,
+        COALESCE(da.discount_type, 'percent') AS discount_type,
         da.discount_percent,
+        da.discount_value,
         da.valid_from,
         da.valid_until,
         da.status,
@@ -881,6 +1048,14 @@ export async function cancelDiscountCode(shortCode: string): Promise<DiscountAut
       WHERE short_code = $1
       RETURNING
         id,
+        promotion_id,
+        promotion_name,
+        COALESCE(voucher_origin, 'manual') AS voucher_origin,
+        issued_to_customer_code,
+        issued_to_customer_group_code,
+        issued_document_type,
+        issued_document_number,
+        COALESCE(require_customer_document_at_cashier, FALSE) AS require_customer_document_at_cashier,
         short_code,
         scope,
         product_codes,
@@ -906,7 +1081,9 @@ export async function cancelDiscountCode(shortCode: string): Promise<DiscountAut
         max_purchases_per_week,
         max_purchases_per_month,
         reusable,
+        COALESCE(discount_type, 'percent') AS discount_type,
         discount_percent,
+        discount_value,
         valid_from,
         valid_until,
         status,

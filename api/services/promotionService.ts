@@ -6,12 +6,13 @@ import {
 } from "../../shared/promotion.js";
 import { ensurePromotionsSchema, query, querySaas } from "../db.js";
 import { cancelPromotionPublication, mapPromotionWithIntegration, syncPromotionPublication } from "./pdvPromotionService.js";
+import { bumpCompanyPromotionCursor, canonicalizeTenantReferenceValues } from "./referenceSyncService.js";
 
 type PromotionRow = {
   id: string;
   company_id: string | null;
   name: string;
-  voucher_code: string;
+  voucher_code: string | null;
   status: Promotion["status"];
   payload: CreatePromotionInput | string;
   created_at: string | Date;
@@ -28,7 +29,7 @@ type PromotionRow = {
 
 type PromotionConflictRow = {
   id: string;
-  voucher_code: string;
+  voucher_code: string | null;
 };
 
 type PromotionCompanyBootstrapRow = {
@@ -224,25 +225,20 @@ async function canonicalizeBranchIds(rawValues: string[]): Promise<string[]> {
   return Array.from(new Set(resolved));
 }
 
-async function canonicalizePromotionReferences(normalized: CreatePromotionInput): Promise<CreatePromotionInput> {
+async function canonicalizePromotionReferences(
+  companyId: string,
+  normalized: CreatePromotionInput,
+): Promise<CreatePromotionInput> {
   return {
     ...normalized,
-    selectedProductCodes: await canonicalizeSingleGridReference(normalized.selectedProductCodes, {
-      tableName: "produto",
-      codeColumn: "codigo",
-      activeClause: "flag = 'A'",
-    }),
-    selectedCustomerCodes: await canonicalizeSingleGridReference(normalized.selectedCustomerCodes, {
-      tableName: "pessoa",
-      codeColumn: "codigo",
-      activeClause: "flag = 'A'",
-    }),
+    selectedProductCodes: await canonicalizeTenantReferenceValues(companyId, "products", normalized.selectedProductCodes),
+    selectedCustomerCodes: await canonicalizeTenantReferenceValues(companyId, "customers", normalized.selectedCustomerCodes),
     selectedBranchIds: await canonicalizeBranchIds(normalized.selectedBranchIds),
-    selectedPaymentFormCodes: await canonicalizeSingleGridReference(normalized.selectedPaymentFormCodes, {
-      tableName: "forma_pgto",
-      codeColumn: "codigo",
-      activeClause: "flag = 'A'",
-    }),
+    selectedPaymentFormCodes: await canonicalizeTenantReferenceValues(
+      companyId,
+      "payment-forms",
+      normalized.selectedPaymentFormCodes,
+    ),
   };
 }
 
@@ -250,6 +246,10 @@ async function assertPromotionVoucherConflict(
   normalized: CreatePromotionInput,
   currentPromotionId?: string,
 ): Promise<void> {
+  if (normalized.voucherMode !== "fixed" || !normalized.voucherCode.trim()) {
+    return;
+  }
+
   const result = await querySaas<PromotionConflictRow>(
     `
       SELECT id, voucher_code
@@ -264,7 +264,7 @@ async function assertPromotionVoucherConflict(
       continue;
     }
 
-    if (row.voucher_code === normalized.voucherCode) {
+    if ((row.voucher_code ?? "") === normalized.voucherCode) {
       throw new PromotionValidationError(["Ja existe uma campanha cadastrada com este voucher."]);
     }
   }
@@ -461,7 +461,8 @@ export async function createPromotion(input: CreatePromotionInput, options: Prom
   await ensurePromotionsSchema();
   await backfillOrphanPromotionOwnershipByBranches();
   await backfillSingleCompanyPromotionOwnership();
-  const normalized = await canonicalizePromotionReferences(normalizePromotionInput(input));
+  const normalized = await canonicalizePromotionReferences(options.companyId, normalizePromotionInput(input));
+  const storedVoucherCode = normalized.voucherMode === "fixed" ? normalized.voucherCode : null;
   const normalizedIssues = validatePromotionInput(normalized);
   if (normalizedIssues.length > 0) {
     throw new PromotionValidationError(normalizedIssues);
@@ -500,7 +501,7 @@ export async function createPromotion(input: CreatePromotionInput, options: Prom
       createPromotionId(),
       options.companyId,
       normalized.name,
-      normalized.voucherCode,
+      storedVoucherCode,
       normalized.status,
       JSON.stringify(normalized),
     ],
@@ -508,6 +509,7 @@ export async function createPromotion(input: CreatePromotionInput, options: Prom
 
   const created = mapPromotionWithIntegration(result.rows[0]);
   created.integration = await syncPromotionPublication(created);
+  await bumpCompanyPromotionCursor(options.companyId);
   return created;
 }
 
@@ -524,7 +526,43 @@ export async function updatePromotion(
   await ensurePromotionsSchema();
   await backfillOrphanPromotionOwnershipByBranches();
   await backfillSingleCompanyPromotionOwnership();
-  const normalized = await canonicalizePromotionReferences(normalizePromotionInput(input));
+  if (!options.companyId) {
+    throw new PromotionValidationError(["Nao foi possivel identificar a empresa dona da campanha."]);
+  }
+
+  const companyFilterSql = options.companyId ? "AND sp.company_id = $2" : "";
+  const currentFilterValues = options.companyId ? [promotionId, options.companyId] : [promotionId];
+  const current = await querySaas<PromotionRow>(
+    `
+      SELECT
+        sp.id,
+        sp.company_id,
+        sp.name,
+        sp.voucher_code,
+        sp.status,
+        sp.payload,
+        sp.created_at,
+        sp.updated_at,
+        spps.authorization_id,
+        spps.state AS sync_state,
+        spps.error AS sync_error,
+        spps.synced_at AS sync_synced_at
+      FROM saas_promotion sp
+      LEFT JOIN saas_promotion_pdv_sync spps
+        ON spps.promotion_id = sp.id
+      WHERE sp.id = $1
+        ${companyFilterSql}
+      LIMIT 1
+    `,
+    currentFilterValues,
+  );
+
+  if (current.rows.length === 0) {
+    return null;
+  }
+
+  const normalized = await canonicalizePromotionReferences(options.companyId, normalizePromotionInput(input));
+  const storedVoucherCode = normalized.voucherMode === "fixed" ? normalized.voucherCode : null;
   const normalizedIssues = validatePromotionInput(normalized);
   if (normalizedIssues.length > 0) {
     throw new PromotionValidationError(normalizedIssues);
@@ -532,11 +570,19 @@ export async function updatePromotion(
   assertAllowedBranches(normalized, options.allowedBranchIds);
   await assertPromotionVoucherConflict(normalized, promotionId);
 
-  const companyFilterSql = options.companyId ? "AND sp.company_id = $6" : "";
+  const currentPromotion = mapPromotionWithIntegration(current.rows[0]);
+  if (
+    currentPromotion.voucherCode.trim() &&
+    (normalized.voucherMode !== "fixed" || currentPromotion.voucherCode !== normalized.voucherCode)
+  ) {
+    await cancelPromotionPublication(currentPromotion);
+  }
+
+  const companyUpdateFilterSql = options.companyId ? "AND sp.company_id = $6" : "";
   const values: unknown[] = [
     promotionId,
     normalized.name,
-    normalized.voucherCode,
+    storedVoucherCode,
     normalized.status,
     JSON.stringify(normalized),
   ];
@@ -555,7 +601,7 @@ export async function updatePromotion(
         payload = $5::jsonb,
         updated_at = NOW()
       WHERE id = $1
-        ${companyFilterSql}
+        ${companyUpdateFilterSql}
       RETURNING
         sp.id,
         sp.company_id,
@@ -589,12 +635,9 @@ export async function updatePromotion(
     values,
   );
 
-  if (result.rows.length === 0) {
-    return null;
-  }
-
   const updated = mapPromotionWithIntegration(result.rows[0]);
   updated.integration = await syncPromotionPublication(updated);
+  await bumpCompanyPromotionCursor(options.companyId);
   return updated;
 }
 
@@ -664,5 +707,11 @@ export async function deletePromotion(promotionId: string, options: PromotionAcc
     return null;
   }
 
-  return mapPromotionWithIntegration(result.rows[0]);
+  const deleted = mapPromotionWithIntegration(result.rows[0]);
+  const companyId = current.rows[0]?.company_id ?? options.companyId ?? null;
+  if (companyId) {
+    await bumpCompanyPromotionCursor(companyId);
+  }
+
+  return deleted;
 }

@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "Databrev Cliente Teste",
+    "slug": "databrev-cliente-teste",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.databrev.clienteteste"
+    },
+    "android": {
+      "package": "com.databrev.clienteteste",
+      "usesCleartextTraffic": true,
+      "adaptiveIcon": {
+        "backgroundColor": "#6d28d9"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "extra": {
+      "projectName": "Databrev Cliente Teste",
+      "tenantId": "company-1",
+      "brandName": "Databrev"
+    },
+    "plugins": [
+      "expo-font"
+    ]
+  }
+}

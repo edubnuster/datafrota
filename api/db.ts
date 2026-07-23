@@ -42,6 +42,8 @@ let companiesSchemaReadyPromise: Promise<void> | null = null;
 let promotionsSchemaReadyPromise: Promise<void> | null = null;
 let saasAdminSchemaReadyPromise: Promise<void> | null = null;
 let pdvAgentSchemaReadyPromise: Promise<void> | null = null;
+let mobileCustomerSchemaReadyPromise: Promise<void> | null = null;
+let referenceSyncSchemaReadyPromise: Promise<void> | null = null;
 
 export type IntegrationBootstrapCheck = {
   key: string;
@@ -69,6 +71,30 @@ export async function withTransaction<T>(
   callback: (queryFn: <R>(text: string, values?: unknown[]) => Promise<{ rows: R[] }>) => Promise<T>,
 ): Promise<T> {
   const client = await clientPool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const scopedQuery = async <R>(text: string, values: unknown[] = []): Promise<{ rows: R[] }> => {
+      const result = await client.query<R>(text, values);
+      return { rows: result.rows };
+    };
+
+    const result = await callback(scopedQuery);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function withSaasTransaction<T>(
+  callback: (queryFn: <R>(text: string, values?: unknown[]) => Promise<{ rows: R[] }>) => Promise<T>,
+): Promise<T> {
+  const client = await saasPool.connect();
 
   try {
     await client.query("BEGIN");
@@ -273,7 +299,7 @@ export async function ensurePromotionsSchema(force = false): Promise<void> {
           id TEXT PRIMARY KEY,
           company_id TEXT NOT NULL REFERENCES saas_company (id) ON DELETE CASCADE,
           name TEXT NOT NULL,
-          voucher_code TEXT NOT NULL UNIQUE,
+          voucher_code TEXT UNIQUE,
           status TEXT NOT NULL CHECK (status IN ('ativa', 'agendada', 'pausada', 'encerrada')),
           payload JSONB NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -285,6 +311,9 @@ export async function ensurePromotionsSchema(force = false): Promise<void> {
 
         ALTER TABLE saas_promotion
           ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES saas_company (id) ON DELETE CASCADE;
+
+        ALTER TABLE saas_promotion
+          ALTER COLUMN voucher_code DROP NOT NULL;
 
         CREATE INDEX IF NOT EXISTS idx_saas_promotion_company_id
           ON saas_promotion (company_id);
@@ -300,6 +329,17 @@ export async function ensurePromotionsSchema(force = false): Promise<void> {
           synced_at TIMESTAMPTZ NULL,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS saas_company_runtime (
+          company_id TEXT PRIMARY KEY REFERENCES saas_company (id) ON DELETE CASCADE,
+          promotion_cursor BIGINT NOT NULL DEFAULT 1,
+          promotion_cursor_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          reference_cursor BIGINT NOT NULL DEFAULT 1,
+          reference_cursor_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_saas_company_runtime_promotion_cursor
+          ON saas_company_runtime (promotion_cursor_updated_at DESC);
       `)
       .then(() => undefined)
       .catch((error) => {
@@ -395,6 +435,75 @@ export async function ensurePdvAgentSchema(force = false): Promise<void> {
   await pdvAgentSchemaReadyPromise;
 }
 
+export async function ensureReferenceSyncSchema(force = false): Promise<void> {
+  await ensurePdvAgentSchema(force);
+
+  if (force) {
+    referenceSyncSchemaReadyPromise = null;
+  }
+
+  if (!referenceSyncSchemaReadyPromise) {
+    referenceSyncSchemaReadyPromise = saasPool
+      .query(`
+        CREATE TABLE IF NOT EXISTS tenant_reference_sync_lock (
+          company_id TEXT PRIMARY KEY REFERENCES saas_company (id) ON DELETE CASCADE,
+          lock_name TEXT NOT NULL DEFAULT 'reference-sync',
+          holder_agent_id TEXT NULL REFERENCES pdv_agent (id) ON DELETE SET NULL,
+          lease_token TEXT NOT NULL,
+          lease_expires_at TIMESTAMPTZ NOT NULL,
+          heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tenant_reference_sync_lock_expires_at
+          ON tenant_reference_sync_lock (lease_expires_at);
+
+        CREATE TABLE IF NOT EXISTS tenant_reference_snapshot_state (
+          company_id TEXT PRIMARY KEY REFERENCES saas_company (id) ON DELETE CASCADE,
+          published_version BIGINT NOT NULL DEFAULT 0,
+          sync_status TEXT NOT NULL DEFAULT 'idle' CHECK (sync_status IN ('idle', 'running', 'error')),
+          last_started_at TIMESTAMPTZ NULL,
+          last_finished_at TIMESTAMPTZ NULL,
+          last_agent_id TEXT NULL REFERENCES pdv_agent (id) ON DELETE SET NULL,
+          last_error TEXT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tenant_reference_snapshot_state_status
+          ON tenant_reference_snapshot_state (sync_status, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS tenant_reference_snapshot_item (
+          company_id TEXT NOT NULL REFERENCES saas_company (id) ON DELETE CASCADE,
+          reference_type TEXT NOT NULL,
+          snapshot_version BIGINT NOT NULL,
+          item_key TEXT NOT NULL,
+          code TEXT NOT NULL,
+          name TEXT NOT NULL,
+          value TEXT NULL,
+          payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (company_id, reference_type, snapshot_version, item_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tenant_reference_snapshot_lookup
+          ON tenant_reference_snapshot_item (company_id, reference_type, snapshot_version);
+
+        CREATE INDEX IF NOT EXISTS idx_tenant_reference_snapshot_code
+          ON tenant_reference_snapshot_item (company_id, reference_type, code);
+
+        CREATE INDEX IF NOT EXISTS idx_tenant_reference_snapshot_value
+          ON tenant_reference_snapshot_item (company_id, reference_type, value);
+      `)
+      .then(() => undefined)
+      .catch((error) => {
+        referenceSyncSchemaReadyPromise = null;
+        throw error;
+      });
+  }
+
+  await referenceSyncSchemaReadyPromise;
+}
+
 export async function ensureSaasAdminSchema(force = false): Promise<void> {
   if (force) {
     saasAdminSchemaReadyPromise = null;
@@ -433,6 +542,99 @@ export async function ensureSaasAdminSchema(force = false): Promise<void> {
   await saasAdminSchemaReadyPromise;
 }
 
+export async function ensureMobileCustomerSchema(force = false): Promise<void> {
+  await ensureCompaniesSchema(force);
+
+  if (force) {
+    mobileCustomerSchemaReadyPromise = null;
+  }
+
+  if (!mobileCustomerSchemaReadyPromise) {
+    mobileCustomerSchemaReadyPromise = saasPool
+      .query(`
+        CREATE TABLE IF NOT EXISTS mobile_customer_account (
+          id TEXT PRIMARY KEY,
+          company_id TEXT NOT NULL REFERENCES saas_company (id) ON DELETE CASCADE,
+          document_type TEXT NOT NULL CHECK (document_type IN ('cpf', 'cnpj')),
+          document_number TEXT NOT NULL,
+          full_name TEXT NOT NULL,
+          phone TEXT NOT NULL,
+          email TEXT NOT NULL,
+          birth_date DATE NULL,
+          birth_date_updated_at TIMESTAMPTZ NULL,
+          password_hash TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'blocked')),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          last_login_at TIMESTAMPTZ NULL
+        );
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES saas_company (id) ON DELETE CASCADE;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS document_type TEXT;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS document_number TEXT;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS full_name TEXT;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS phone TEXT;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS email TEXT;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS birth_date DATE NULL;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS birth_date_updated_at TIMESTAMPTZ NULL;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS password_hash TEXT;
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+        ALTER TABLE mobile_customer_account
+          ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ NULL;
+
+        UPDATE mobile_customer_account
+           SET status = COALESCE(NULLIF(status, ''), 'active'),
+               updated_at = COALESCE(updated_at, NOW()),
+               created_at = COALESCE(created_at, NOW());
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mobile_customer_company_email
+          ON mobile_customer_account (company_id, email);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mobile_customer_company_document
+          ON mobile_customer_account (company_id, document_type, document_number);
+
+        CREATE INDEX IF NOT EXISTS idx_mobile_customer_company_status
+          ON mobile_customer_account (company_id, status);
+
+        CREATE INDEX IF NOT EXISTS idx_mobile_customer_last_login
+          ON mobile_customer_account (last_login_at DESC NULLS LAST);
+      `)
+      .then(() => undefined)
+      .catch((error) => {
+        mobileCustomerSchemaReadyPromise = null;
+        throw error;
+      });
+  }
+
+  await mobileCustomerSchemaReadyPromise;
+}
+
 export async function ensureDiscountSchema(force = false): Promise<void> {
   if (force) {
     schemaReadyPromise = null;
@@ -445,6 +647,14 @@ export async function ensureDiscountSchema(force = false): Promise<void> {
           id TEXT PRIMARY KEY,
           company_id TEXT NULL,
           source_branch_id TEXT NULL,
+          promotion_id TEXT NULL,
+          promotion_name TEXT NULL,
+          voucher_origin TEXT NOT NULL DEFAULT 'manual',
+          issued_to_customer_code TEXT NULL,
+          issued_to_customer_group_code TEXT NULL,
+          issued_document_type TEXT NULL,
+          issued_document_number TEXT NULL,
+          require_customer_document_at_cashier BOOLEAN NOT NULL DEFAULT FALSE,
           short_code TEXT NOT NULL UNIQUE,
           scope TEXT NOT NULL CHECK (scope IN ('ALL_PRODUCTS', 'PRODUCT', 'PRODUCT_GROUP')),
           product_codes TEXT[] NULL,
@@ -471,7 +681,9 @@ export async function ensureDiscountSchema(force = false): Promise<void> {
           max_purchases_per_week INTEGER NULL,
           max_purchases_per_month INTEGER NULL,
           reusable BOOLEAN NOT NULL DEFAULT FALSE,
+          discount_type TEXT NOT NULL DEFAULT 'percent' CHECK (discount_type IN ('percent', 'fixed')),
           discount_percent NUMERIC(5,2) NOT NULL,
+          discount_value NUMERIC(15,2) NULL,
           valid_from TIMESTAMPTZ NULL,
           valid_until TIMESTAMPTZ NULL,
           status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'EXPIRED', 'CANCELLED')),
@@ -490,6 +702,30 @@ export async function ensureDiscountSchema(force = false): Promise<void> {
 
         ALTER TABLE discount_authorization
           ADD COLUMN IF NOT EXISTS source_branch_id TEXT NULL;
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS promotion_id TEXT NULL;
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS promotion_name TEXT NULL;
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS voucher_origin TEXT NOT NULL DEFAULT 'manual';
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS issued_to_customer_code TEXT NULL;
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS issued_to_customer_group_code TEXT NULL;
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS issued_document_type TEXT NULL;
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS issued_document_number TEXT NULL;
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS require_customer_document_at_cashier BOOLEAN NOT NULL DEFAULT FALSE;
 
         ALTER TABLE discount_authorization
           ADD COLUMN IF NOT EXISTS product_codes TEXT[] NULL;
@@ -554,8 +790,20 @@ export async function ensureDiscountSchema(force = false): Promise<void> {
         ALTER TABLE discount_authorization
           ADD COLUMN IF NOT EXISTS reusable BOOLEAN NOT NULL DEFAULT FALSE;
 
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS discount_type TEXT NOT NULL DEFAULT 'percent';
+
+        ALTER TABLE discount_authorization
+          ADD COLUMN IF NOT EXISTS discount_value NUMERIC(15,2) NULL;
+
         CREATE INDEX IF NOT EXISTS idx_discount_authorization_company_id
           ON discount_authorization (company_id);
+
+        CREATE INDEX IF NOT EXISTS idx_discount_authorization_promotion_id
+          ON discount_authorization (promotion_id);
+
+        CREATE INDEX IF NOT EXISTS idx_discount_authorization_issued_document
+          ON discount_authorization (issued_document_number);
 
         UPDATE discount_authorization
            SET product_codes = ARRAY[product_code]
@@ -598,6 +846,20 @@ export async function ensureDiscountSchema(force = false): Promise<void> {
         UPDATE discount_authorization
            SET birthday_only = FALSE
          WHERE birthday_only IS NULL;
+
+        UPDATE discount_authorization
+           SET discount_type = COALESCE(NULLIF(discount_type, ''), 'percent')
+         WHERE discount_type IS NULL
+            OR discount_type = '';
+
+        UPDATE discount_authorization
+           SET voucher_origin = COALESCE(NULLIF(voucher_origin, ''), 'manual')
+         WHERE voucher_origin IS NULL
+            OR voucher_origin = '';
+
+        UPDATE discount_authorization
+           SET require_customer_document_at_cashier = FALSE
+         WHERE require_customer_document_at_cashier IS NULL;
       `)
       .then(() => undefined)
       .catch((error) => {
@@ -632,7 +894,9 @@ export async function ensureCashierSchema(force = false): Promise<void> {
           caixa_data DATE NULL,
           caixa_turno INTEGER NULL,
           caixa_usuario TEXT NULL,
+          tipo_desconto TEXT NOT NULL DEFAULT 'percent' CHECK (tipo_desconto IN ('percent', 'fixed')),
           percentual_desconto NUMERIC(5,2) NOT NULL,
+          valor_fixo_configurado NUMERIC(15,2) NULL,
           valor_desconto NUMERIC(15,2) NULL,
           quantidade NUMERIC(15,3) NULL,
           status CHAR(1) NOT NULL DEFAULT 'P',
@@ -695,7 +959,13 @@ export async function ensureCashierSchema(force = false): Promise<void> {
           ADD COLUMN IF NOT EXISTS pdv_agent_id TEXT NULL;
 
         ALTER TABLE datafrota_desconto_pendente
+          ADD COLUMN IF NOT EXISTS tipo_desconto TEXT NOT NULL DEFAULT 'percent';
+
+        ALTER TABLE datafrota_desconto_pendente
           ADD COLUMN IF NOT EXISTS percentual_desconto NUMERIC(5,2);
+
+        ALTER TABLE datafrota_desconto_pendente
+          ADD COLUMN IF NOT EXISTS valor_fixo_configurado NUMERIC(15,2) NULL;
 
         ALTER TABLE datafrota_desconto_pendente
           ADD COLUMN IF NOT EXISTS product_codes TEXT[] NULL;
@@ -824,8 +1094,14 @@ export async function ensureCashierSchema(force = false): Promise<void> {
          WHERE birthday_only IS NULL;
 
         UPDATE datafrota_desconto_pendente
+           SET tipo_desconto = COALESCE(NULLIF(tipo_desconto, ''), 'percent')
+         WHERE tipo_desconto IS NULL
+            OR tipo_desconto = '';
+
+        UPDATE datafrota_desconto_pendente
            SET subtotal_elegivel = ROUND((valor_desconto * 100.0) / NULLIF(percentual_desconto, 0), 2)
          WHERE subtotal_elegivel IS NULL
+           AND COALESCE(tipo_desconto, 'percent') = 'percent'
            AND status IN ('R', 'A')
            AND valor_desconto IS NOT NULL
            AND percentual_desconto IS NOT NULL;
@@ -1400,7 +1676,12 @@ export async function ensureCashierSchema(force = false): Promise<void> {
             IF v_desc.status = 'R' AND v_desc.mlid = v_mlid THEN
                 v_subtotal_elegivel := COALESCE(
                     v_desc.subtotal_elegivel,
-                    ROUND((COALESCE(v_desc.valor_desconto, 0) * 100.0) / NULLIF(v_desc.percentual_desconto, 0), 2),
+                    CASE
+                        WHEN COALESCE(v_desc.tipo_desconto, 'percent') = 'percent' THEN
+                            ROUND((COALESCE(v_desc.valor_desconto, 0) * 100.0) / NULLIF(v_desc.percentual_desconto, 0), 2)
+                        ELSE
+                            COALESCE(v_desc.valor_desconto, 0)
+                    END,
                     0
                 ) + NEW.valor;
                 v_quantidade_elegivel := COALESCE(v_desc.quantidade_elegivel, 0) + COALESCE(NEW.quantidade, 0);
@@ -1411,7 +1692,15 @@ export async function ensureCashierSchema(force = false): Promise<void> {
                 v_valor_desconto_anterior := 0;
             END IF;
 
-            v_valor_desconto_total := ROUND((v_subtotal_elegivel * (v_desc.percentual_desconto / 100.0))::numeric, 2);
+            IF COALESCE(v_desc.tipo_desconto, 'percent') = 'fixed' THEN
+                v_valor_desconto_total := LEAST(
+                    COALESCE(v_desc.valor_fixo_configurado, 0),
+                    v_subtotal_elegivel
+                );
+            ELSE
+                v_valor_desconto_total := ROUND((v_subtotal_elegivel * (v_desc.percentual_desconto / 100.0))::numeric, 2);
+            END IF;
+
             v_valor_desconto_delta := v_valor_desconto_total - v_valor_desconto_anterior;
 
             IF v_valor_desconto_total <= 0 THEN

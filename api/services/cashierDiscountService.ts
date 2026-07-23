@@ -29,7 +29,9 @@ type PendingAuthorizationRow = {
   new_customer_days: string | number | null;
   payment_form_codes: string[] | null;
   payment_form_code: string | null;
+  tipo_desconto: "percent" | "fixed" | null;
   percentual_desconto: string | number;
+  valor_fixo_configurado: string | number | null;
   valor_desconto: string | number | null;
   quantidade: string | number | null;
   status: CashierPendingAuthorization["status"];
@@ -118,6 +120,8 @@ function buildLegacyCompatibleArraySql(arrayColumn: string, legacyColumn: string
 }
 
 function mapPendingRow(row: PendingAuthorizationRow): CashierPendingAuthorization {
+  const discountType = row.tipo_desconto === "fixed" ? "fixed" : "percent";
+
   return {
     id: Number(row.grid),
     shortCode: row.codigo_desconto,
@@ -135,8 +139,16 @@ function mapPendingRow(row: PendingAuthorizationRow): CashierPendingAuthorizatio
         ? null
         : Number(row.new_customer_days),
     paymentFormCodes: coalesceLegacyList(row.payment_form_codes, row.payment_form_code),
-    discountPercent: Number(row.percentual_desconto),
-    discountValue: row.valor_desconto === null ? null : Number(row.valor_desconto),
+    discountType,
+    discountPercent: discountType === "percent" ? Number(row.percentual_desconto) : null,
+    discountValue:
+      discountType === "fixed"
+        ? row.valor_fixo_configurado === null || row.valor_fixo_configurado === undefined
+          ? null
+          : Number(row.valor_fixo_configurado)
+        : row.valor_desconto === null || row.valor_desconto === undefined
+          ? null
+          : Number(row.valor_desconto),
     quantity: row.quantidade === null ? null : Number(row.quantidade),
     status: row.status,
     validUntil: new Date(row.validade).toISOString(),
@@ -176,6 +188,14 @@ function mapCashierContextRow(row: CashierContextRow): CashierContext {
 }
 
 type AuthorizationRestrictionsRow = {
+  promotion_id: string | null;
+  promotion_name: string | null;
+  voucher_origin: "manual" | "promotion_fixed" | "promotion_mobile";
+  issued_to_customer_code: string | null;
+  issued_to_customer_group_code: string | null;
+  issued_document_type: "cpf" | "cnpj" | null;
+  issued_document_number: string | null;
+  require_customer_document_at_cashier: boolean;
   product_codes: string[];
   product_group_codes: string[];
   customer_codes: string[];
@@ -203,6 +223,14 @@ async function loadAuthorizationRestrictions(
   const result = await query<AuthorizationRestrictionsRow>(
     `
       SELECT
+        promotion_id,
+        promotion_name,
+        COALESCE(voucher_origin, 'manual') AS voucher_origin,
+        issued_to_customer_code,
+        issued_to_customer_group_code,
+        issued_document_type,
+        issued_document_number,
+        COALESCE(require_customer_document_at_cashier, FALSE) AS require_customer_document_at_cashier,
         ${buildLegacyCompatibleArraySql("product_codes", "product_code")} AS product_codes,
         ${buildLegacyCompatibleArraySql("product_group_codes", "product_group_code")} AS product_group_codes,
         ${buildLegacyCompatibleArraySql("customer_codes", "customer_code")} AS customer_codes,
@@ -379,13 +407,20 @@ function buildValidationPayload(shortCode: string, result: Awaited<ReturnType<ty
   }
 
   const authorization = result.authorization;
+  const issuedDocumentDigits = String(authorization.issuedDocumentNumber ?? "").replace(/\D/g, "");
+  const issuedDocumentHint =
+    issuedDocumentDigits.length <= 4
+      ? issuedDocumentDigits || null
+      : `${"*".repeat(Math.max(issuedDocumentDigits.length - 4, 0))}${issuedDocumentDigits.slice(-4)}`;
   return {
     shortCode,
     found: result.found,
     reason: result.reason,
     authorization: {
       id: authorization.id,
+      discountType: authorization.discountType,
       discountPercent: authorization.discountPercent,
+      discountValue: authorization.discountValue,
       scope: authorization.scope,
       productCodes: authorization.productCodes,
       productGroupCodes: authorization.productGroupCodes,
@@ -408,6 +443,14 @@ function buildValidationPayload(shortCode: string, result: Awaited<ReturnType<ty
       reusable: authorization.reusable,
       validFrom: authorization.validFrom,
       validUntil: authorization.validUntil,
+      promotionId: authorization.promotionId,
+      promotionName: authorization.promotionName,
+      voucherOrigin: authorization.voucherOrigin,
+      issuedToCustomerCode: authorization.issuedToCustomerCode,
+      issuedToCustomerGroupCode: authorization.issuedToCustomerGroupCode,
+      issuedDocumentType: authorization.issuedDocumentType,
+      issuedDocumentHint,
+      requireCustomerDocumentAtCashier: authorization.requireCustomerDocumentAtCashier,
       status: authorization.status,
     },
   };
@@ -422,6 +465,7 @@ function validateAuthorizeInput(input: CreateCashierAuthorizationInput): CreateC
   const conta = normalizeText(input.conta);
   const estacao = canonicalizeStation(input.estacao);
   const stationHint = canonicalizeStation(input.stationHint);
+  const documentNumber = String(input.documentNumber ?? "").replace(/\D/g, "") || null;
 
   if (!shortCode) {
     throw new CashierVoucherError("Informe o voucher do app frota.", 400);
@@ -442,6 +486,7 @@ function validateAuthorizeInput(input: CreateCashierAuthorizationInput): CreateC
     estacao,
     stationHint,
     quantidade: quantity,
+    documentNumber,
     mensagemDoc: normalizeText(input.mensagemDoc),
     mensagemPdv: normalizeText(input.mensagemPdv),
   };
@@ -508,6 +553,17 @@ export async function createCashierAuthorization(
     throw new CashierVoucherError(contextIssue, 409);
   }
 
+  if (authorizationRestrictions.require_customer_document_at_cashier) {
+    if (!normalized.documentNumber) {
+      throw new CashierVoucherError("Informe o CPF/CNPJ do cliente para confirmar este voucher.", 400);
+    }
+
+    const expectedDocument = String(authorizationRestrictions.issued_document_number ?? "").replace(/\D/g, "");
+    if (!expectedDocument || normalized.documentNumber !== expectedDocument) {
+      throw new CashierVoucherError("CPF/CNPJ divergente do cliente autorizado para esta promocao.", 403);
+    }
+  }
+
   const validUntil = buildPendingValidity(voucher.authorization.validUntil).toISOString();
   const result = await withTransaction<{ rows: PendingAuthorizationRow[] }>(async (txQuery) => {
     await txQuery(
@@ -537,7 +593,9 @@ export async function createCashierAuthorization(
           caixa_data,
           caixa_turno,
           caixa_usuario,
+          tipo_desconto,
           percentual_desconto,
+          valor_fixo_configurado,
           valor_desconto,
           quantidade,
           status,
@@ -571,9 +629,9 @@ export async function createCashierAuthorization(
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-          NULL, $13, 'P', $14, $15, $16, $17, $18, $19, $20,
-          $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
-          $31, $32, $33, $34, $35, $36, $37, $38, $39, $40
+          $13, $14, NULL, $15, 'P', $16, $17, $18, $19, $20, $21,
+          $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
+          $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42
         )
         RETURNING
             grid,
@@ -606,7 +664,9 @@ export async function createCashierAuthorization(
             max_purchases_per_week,
             max_purchases_per_month,
             reusable,
+            tipo_desconto,
             percentual_desconto,
+            valor_fixo_configurado,
             valor_desconto,
             quantidade,
             status,
@@ -633,7 +693,9 @@ export async function createCashierAuthorization(
         operationalContext.saleDate ? operationalContext.saleDate.slice(0, 10) : null,
         operationalContext.turno,
         operationalContext.usuario,
-        voucher.authorization.discountPercent,
+        voucher.authorization.discountType,
+        voucher.authorization.discountPercent ?? 1,
+        voucher.authorization.discountType === "fixed" ? voucher.authorization.discountValue : null,
         normalized.quantidade,
         validUntil,
         authorizationRestrictions.product_codes,

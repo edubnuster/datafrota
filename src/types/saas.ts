@@ -10,6 +10,7 @@ export type {
   PromotionPaymentMode,
   PromotionProductMode,
   PromotionStatus,
+  PromotionVoucherMode,
   PromotionWeekday,
 } from "../../shared/promotion";
 export type { SaasAdminAccount, UpdateSaasAdminAccountInput } from "../../shared/adminAccount";

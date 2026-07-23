@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDiscountScope,
   createShortCode,
+  DEFAULT_SHORT_CODE_LENGTH,
   getEffectiveStatus,
   validateCreateDiscountInput,
 } from "./discount";
@@ -64,8 +65,8 @@ describe("discount rules", () => {
   });
 
   it("gera codigo curto com alfabeto amigavel para digitacao", () => {
-    const code = createShortCode(8, () => 0);
-    expect(code).toBe("AAAAAAAA");
+    const code = createShortCode(undefined, () => 0);
+    expect(code).toBe("A".repeat(DEFAULT_SHORT_CODE_LENGTH));
   });
 
   it("marca como expirado quando a validade final ja passou", () => {
@@ -224,5 +225,20 @@ describe("discount rules", () => {
     });
 
     expect(issues).toContain("O horario final nao pode ser menor que o horario inicial.");
+  });
+
+  it("aceita desconto fixo quando o valor e positivo", () => {
+    const issues = validateCreateDiscountInput({
+      productCodes: ["123"],
+      productGroupCodes: null,
+      customerCodes: null,
+      customerGroupCodes: null,
+      firstPurchaseOnly: false,
+      paymentFormCodes: [],
+      discountType: "fixed",
+      discountValue: 0.15,
+    });
+
+    expect(issues).toEqual([]);
   });
 });

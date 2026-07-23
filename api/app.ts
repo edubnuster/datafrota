@@ -13,6 +13,7 @@ import promotionRoutes from "./routes/promotions.js";
 import pdvPromotionRoutes from "./routes/pdvPromotions.js";
 import pdvAgentRoutes from "./routes/pdvAgents.js";
 import adminAccountRoutes from "./routes/adminAccount.js";
+import mobileCustomerRoutes from "./routes/mobileCustomers.js";
 
 dotenv.config();
 
@@ -33,6 +34,7 @@ app.use("/api/promotions", promotionRoutes);
 app.use("/api/pdv-promotions", pdvPromotionRoutes);
 app.use("/api/pdv-agents", pdvAgentRoutes);
 app.use("/api/admin-account", adminAccountRoutes);
+app.use("/api/mobile-customers", mobileCustomerRoutes);
 
 /**
  * health

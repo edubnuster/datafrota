@@ -1,9 +1,13 @@
 export const SHORT_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const DEFAULT_SHORT_CODE_LENGTH = 5;
 export const DISCOUNT_WEEKDAY_VALUES = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"] as const;
+export const DISCOUNT_VOUCHER_ORIGIN_VALUES = ["manual", "promotion_fixed", "promotion_mobile"] as const;
 
 export type DiscountScope = "ALL_PRODUCTS" | "PRODUCT" | "PRODUCT_GROUP";
 export type DiscountStatus = "ACTIVE" | "EXPIRED" | "CANCELLED";
+export type DiscountType = "percent" | "fixed";
 export type DiscountWeekday = (typeof DISCOUNT_WEEKDAY_VALUES)[number];
+export type DiscountVoucherOrigin = (typeof DISCOUNT_VOUCHER_ORIGIN_VALUES)[number];
 
 export type CreateDiscountCodeInput = {
   productCodes?: string[] | null;
@@ -25,9 +29,19 @@ export type CreateDiscountCodeInput = {
   maxPurchasesPerWeek?: number | null;
   maxPurchasesPerMonth?: number | null;
   reusable?: boolean | null;
-  discountPercent: number;
+  discountType?: DiscountType | null;
+  discountPercent?: number | null;
+  discountValue?: number | null;
   validFrom?: string | null;
   validUntil?: string | null;
+  promotionId?: string | null;
+  promotionName?: string | null;
+  voucherOrigin?: DiscountVoucherOrigin | null;
+  issuedToCustomerCode?: string | null;
+  issuedToCustomerGroupCode?: string | null;
+  issuedDocumentType?: "cpf" | "cnpj" | null;
+  issuedDocumentNumber?: string | null;
+  requireCustomerDocumentAtCashier?: boolean | null;
 };
 
 export type DiscountAuthorization = {
@@ -53,9 +67,19 @@ export type DiscountAuthorization = {
   maxPurchasesPerWeek: number | null;
   maxPurchasesPerMonth: number | null;
   reusable: boolean;
-  discountPercent: number;
+  discountType: DiscountType;
+  discountPercent: number | null;
+  discountValue: number | null;
   validFrom: string | null;
   validUntil: string | null;
+  promotionId: string | null;
+  promotionName: string | null;
+  voucherOrigin: DiscountVoucherOrigin;
+  issuedToCustomerCode: string | null;
+  issuedToCustomerGroupCode: string | null;
+  issuedDocumentType: "cpf" | "cnpj" | null;
+  issuedDocumentNumber: string | null;
+  requireCustomerDocumentAtCashier: boolean;
   status: DiscountStatus;
   createdAt: string;
   cancelledAt: string | null;
@@ -117,6 +141,16 @@ function normalizeOptionalTime(value?: string | null): string | null {
   return normalized ? normalized : null;
 }
 
+function normalizeOptionalText(value?: string | null): string | null {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
+}
+
+function normalizeDocumentDigits(value?: string | null): string | null {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  return digits || null;
+}
+
 export function buildDiscountScope(input: CreateDiscountCodeInput): DiscountScope {
   if (cleanOptionalList(input.productCodes).length > 0) {
     return "PRODUCT";
@@ -130,6 +164,8 @@ export function buildDiscountScope(input: CreateDiscountCodeInput): DiscountScop
 }
 
 export function normalizeCreateDiscountInput(input: CreateDiscountCodeInput): CreateDiscountCodeInput {
+  const discountType = input.discountType === "fixed" ? "fixed" : "percent";
+
   const firstPurchaseOnly = Boolean(input.firstPurchaseOnly);
   const rawNewCustomerDays =
     input.newCustomerDays === undefined || input.newCustomerDays === null
@@ -156,9 +192,21 @@ export function normalizeCreateDiscountInput(input: CreateDiscountCodeInput): Cr
     maxPurchasesPerWeek: normalizeOptionalNumber(input.maxPurchasesPerWeek),
     maxPurchasesPerMonth: normalizeOptionalNumber(input.maxPurchasesPerMonth),
     reusable: Boolean(input.reusable),
-    discountPercent: Number(input.discountPercent),
+    discountType,
+    discountPercent: discountType === "percent" ? Number(input.discountPercent) : null,
+    discountValue: discountType === "fixed" ? normalizeOptionalNumber(input.discountValue) : null,
     validFrom: input.validFrom || null,
     validUntil: input.validUntil || null,
+    promotionId: cleanOptional(input.promotionId),
+    promotionName: normalizeOptionalText(input.promotionName),
+    voucherOrigin: DISCOUNT_VOUCHER_ORIGIN_VALUES.includes(input.voucherOrigin as DiscountVoucherOrigin)
+      ? (input.voucherOrigin as DiscountVoucherOrigin)
+      : "manual",
+    issuedToCustomerCode: cleanOptional(input.issuedToCustomerCode),
+    issuedToCustomerGroupCode: cleanOptional(input.issuedToCustomerGroupCode),
+    issuedDocumentType: input.issuedDocumentType === "cnpj" ? "cnpj" : input.issuedDocumentType === "cpf" ? "cpf" : null,
+    issuedDocumentNumber: normalizeDocumentDigits(input.issuedDocumentNumber),
+    requireCustomerDocumentAtCashier: Boolean(input.requireCustomerDocumentAtCashier),
   };
 }
 
@@ -166,12 +214,18 @@ export function validateCreateDiscountInput(input: CreateDiscountCodeInput): str
   const errors: string[] = [];
   const normalized = normalizeCreateDiscountInput(input);
 
-  if (!Number.isFinite(normalized.discountPercent) || normalized.discountPercent <= 0) {
-    errors.push("Informe um percentual de desconto maior que zero.");
-  }
+  if (normalized.discountType === "fixed") {
+    if (!Number.isFinite(normalized.discountValue) || (normalized.discountValue ?? 0) <= 0) {
+      errors.push("Informe um valor fixo de desconto maior que zero.");
+    }
+  } else {
+    if (!Number.isFinite(normalized.discountPercent) || (normalized.discountPercent ?? 0) <= 0) {
+      errors.push("Informe um percentual de desconto maior que zero.");
+    }
 
-  if (normalized.discountPercent > 100) {
-    errors.push("O percentual de desconto nao pode ser maior que 100.");
+    if ((normalized.discountPercent ?? 0) > 100) {
+      errors.push("O percentual de desconto nao pode ser maior que 100.");
+    }
   }
 
   if (
@@ -276,7 +330,7 @@ export function validateCreateDiscountInput(input: CreateDiscountCodeInput): str
   return errors;
 }
 
-export function createShortCode(length = 8, random = Math.random): string {
+export function createShortCode(length = DEFAULT_SHORT_CODE_LENGTH, random = Math.random): string {
   return Array.from({ length }, () => {
     const index = Math.floor(random() * SHORT_CODE_ALPHABET.length);
     return SHORT_CODE_ALPHABET[index];
