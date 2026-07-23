@@ -69,6 +69,30 @@ function Get-TrackingInfo {
   }
 }
 
+function Resolve-CommitMessage {
+  param([string]$CurrentMessage)
+
+  if (-not [string]::IsNullOrWhiteSpace($CurrentMessage)) {
+    return $CurrentMessage.Trim()
+  }
+
+  Write-Step "Resumo das ultimas modificacoes"
+  $null = Invoke-Git -Args @("diff", "--cached", "--stat")
+
+  $defaultMessage = "chore: atualiza projeto $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+  Write-Host ""
+  Write-Host "Digite um comentario para essas modificacoes." -ForegroundColor Cyan
+  Write-Host "Pressione Enter vazio para usar o padrao abaixo:" -ForegroundColor DarkGray
+  Write-Host $defaultMessage -ForegroundColor DarkGray
+
+  $typedMessage = Read-Host "Comentario"
+  if ([string]::IsNullOrWhiteSpace($typedMessage)) {
+    return $defaultMessage
+  }
+
+  return $typedMessage.Trim()
+}
+
 Set-Location $projectRoot
 
 Write-Step "Validando ambiente Git"
@@ -128,9 +152,7 @@ if ($cachedDiffResult.ExitCode -eq 1) {
 }
 
 if ($hasStagedChanges) {
-  if ([string]::IsNullOrWhiteSpace($Mensagem)) {
-    $Mensagem = "chore: atualiza projeto $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-  }
+  $Mensagem = Resolve-CommitMessage -CurrentMessage $Mensagem
 
   Write-Step "Criando commit"
   $null = Invoke-Git -Args @("commit", "-m", $Mensagem)
